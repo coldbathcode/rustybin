@@ -9,7 +9,8 @@
 //! | `POST /_rustybin/mcp-checks` | read | Run the check suite ([`checks`]); JSON or JUnit; saved (at most 50) |
 //! | `GET /_rustybin/mcp-checks`, `GET`, `DELETE /_rustybin/mcp-checks/{id}` | read / admin | The saved runs |
 //! | `GET /_rustybin/mcp-connections`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` | read / admin | Saved connections, credentials sealed ([`store`]) |
-//! | `GET /_rustybin/oauth/inspector-client.json` | open | The inspector's client ID metadata document ([`clientdoc`]) |
+//! | `GET /.well-known/rustybin-inspector-client.json` | open | The inspector's client ID metadata document ([`clientdoc`]), on the data plane |
+//! | `GET /_rustybin/oauth/inspector-client.json` | open | The same document at its 0.7.0 address |
 //!
 //! "read" is the console scope (control auth lets it through as a
 //! read-only POST: these routes change nothing on the instance); outbound
@@ -597,6 +598,10 @@ pub fn router(state: &AppState) -> Router<AppState> {
     Router::new()
         .route(SERVERS_PATH, get(servers))
         .route(clientdoc::DOCUMENT_PATH, get(clientdoc::handler))
+        .route(
+            clientdoc::LEGACY_DOCUMENT_PATH,
+            get(clientdoc::legacy_handler),
+        )
         .route(RELAY_PATH, post(relay::relay))
         .route(RELAY_FETCH_PATH, post(relay::fetch))
         .route(
@@ -654,9 +659,12 @@ pub fn catalog() -> Vec<Endpoint> {
 .permission_for(&["GET"], crate::rbac::Permission::McpInspect).permission_for(&["PUT", "DELETE"], crate::rbac::Permission::McpConnections)
             .example(Example::get("A saved connection", "/_rustybin/mcp-connections/unknown").expect_status(404)),
         Endpoint::new(clientdoc::DOCUMENT_PATH, &["GET"], category::CONTROL, "MCP inspector: its client ID metadata document (the client id the OAuth walk sends where a server supports one)")
-.open()
-            .description("Public, like the other OAuth metadata: the inspector's name and the console's callback as its only redirect URI. An authorization server that says client_id_metadata_document_supported fetches it, so it is usable only when this instance is reached over https on a host that is not loopback (GET /_rustybin/mcp-servers says which under client_document).")
+            .description("Public, like the other OAuth metadata, and outside the control plane so that any authorization server may fetch it (another Rustybin's outbound policy never calls a /_rustybin path): the inspector's name and the console's callback as its only redirect URI. No credential, API key or session. An authorization server that says client_id_metadata_document_supported fetches it, so it is usable only when this instance is reached over https on a host that is not loopback (GET /_rustybin/mcp-servers says which under client_document).")
             .example(Example::get("The inspector's client document", clientdoc::DOCUMENT_PATH)),
+        Endpoint::new(clientdoc::LEGACY_DOCUMENT_PATH, &["GET"], category::CONTROL, "MCP inspector: its client document at the address 0.7.0 used (kept for saved connections; the walk sends /.well-known/rustybin-inspector-client.json)")
+.open()
+            .description("The same document but for its client_id, which is this address. Kept so a server that knows the inspector by it still can read it; the OAuth walk and the client_document check send the address outside the control plane.")
+            .example(Example::get("The inspector's client document, 0.7.0 address", clientdoc::LEGACY_DOCUMENT_PATH)),
     ]
 }
 
@@ -687,10 +695,15 @@ pub fn openapi_paths() -> Value {
     checks_props["save"] = json!({ "type": "boolean" });
     checks_props["format"] = json!({ "type": "string", "enum": ["json", "junit"] });
     json!({
-        SERVERS_PATH: { "get": { "tags": tags, "summary": "MCP servers of this instance", "operationId": "listMcpServers", "responses": ok("{servers, relay, checks, client_document: {url, redirect_uri, usable, reason, document, ways}}") } },
+        SERVERS_PATH: { "get": { "tags": tags, "summary": "MCP servers of this instance", "operationId": "listMcpServers", "responses": ok("{servers, relay, checks, client_document: {url, legacy_url, redirect_uri, usable, reason, document, ways}}") } },
+        clientdoc::LEGACY_DOCUMENT_PATH: { "get": {
+            "tags": tags, "summary": "The MCP inspector's client document at its 0.7.0 address", "operationId": "getInspectorClientDocumentLegacy", "security": [],
+            "description": "The document of /.well-known/rustybin-inspector-client.json with this address as its client_id. Kept for saved connections and servers that know the inspector by it; the OAuth walk sends the other address. No credentials; nothing secret.",
+            "responses": ok("The document"),
+        } },
         clientdoc::DOCUMENT_PATH: { "get": {
             "tags": tags, "summary": "The MCP inspector's client ID metadata document", "operationId": "getInspectorClientDocument", "security": [],
-            "description": "The document whose URL the inspector's OAuth walk sends as its client id to an authorization server that supports client ID metadata documents. No credentials; nothing secret.",
+            "description": "The document whose URL the inspector's OAuth walk sends as its client id to an authorization server that supports client ID metadata documents. Outside the control plane, so any authorization server may fetch it. No credentials, API key or session; nothing secret.",
             "responses": { "200": { "description": "The document", "content": { "application/json": { "schema": { "type": "object", "required": ["client_id", "redirect_uris"], "properties": {
                 "client_id": { "type": "string", "description": "This document's own URL" },
                 "client_name": { "type": "string" },

@@ -60,8 +60,13 @@ pub const AUTHORIZE_PATH: &str = "/_rustybin/oauth/authorize";
 pub const TOKEN_PATH: &str = "/_rustybin/oauth/token";
 pub const REQUESTS_PATH: &str = "/_rustybin/oauth/requests/{id}";
 /// The MCP inspector's client ID metadata document
-/// (`crate::mcp::inspector::clientdoc`): public, served in every mode.
-pub const INSPECTOR_CLIENT_PATH: &str = "/_rustybin/oauth/inspector-client.json";
+/// (`crate::mcp::inspector::clientdoc`): public, served in every mode, on
+/// the data plane so that any authorization server may fetch it (the
+/// outbound policy of a Rustybin never calls a `/_rustybin` path).
+pub const INSPECTOR_CLIENT_PATH: &str = "/.well-known/rustybin-inspector-client.json";
+/// The address 0.7.0 served it at, under the control plane: kept answering
+/// for saved connections and for servers that know the inspector by it.
+pub const INSPECTOR_CLIENT_LEGACY_PATH: &str = "/_rustybin/oauth/inspector-client.json";
 const REQUESTS_PREFIX: &str = "/_rustybin/oauth/requests/";
 /// The console's consent page (the request id follows).
 pub const CONSENT_PAGE: &str = "/ui/#/authorize/";
@@ -235,7 +240,7 @@ pub fn mode(config: &Config) -> &'static str {
 pub fn is_public_path(path: &str) -> bool {
     matches!(
         path,
-        REGISTER_PATH | AUTHORIZE_PATH | TOKEN_PATH | INSPECTOR_CLIENT_PATH
+        REGISTER_PATH | AUTHORIZE_PATH | TOKEN_PATH | INSPECTOR_CLIENT_LEGACY_PATH
     )
 }
 
@@ -243,7 +248,11 @@ pub fn is_public_path(path: &str) -> bool {
 pub fn is_discovery_path(path: &str) -> bool {
     matches!(
         path,
-        PRM_PATH | AS_METADATA_PATH | OIDC_METADATA_PATH | INSPECTOR_CLIENT_PATH
+        PRM_PATH
+            | AS_METADATA_PATH
+            | OIDC_METADATA_PATH
+            | INSPECTOR_CLIENT_PATH
+            | INSPECTOR_CLIENT_LEGACY_PATH
     )
 }
 

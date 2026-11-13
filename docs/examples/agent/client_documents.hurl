@@ -146,14 +146,82 @@ HTTP 400
 body contains "must be an https URL"
 # ANCHOR_END: refused
 
+# ANCHOR: inspector
+# The inspector of a Rustybin as the client: its document's address outside
+# the control plane, and the console's callback as the redirect URI.
+GET {{secured_url}}/_rustybin/oauth/authorize
+[Query]
+response_type: code
+client_id: {{secured_url}}/.well-known/rustybin-inspector-client.json
+redirect_uri: {{secured_url}}/ui/callback
+code_challenge: E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+code_challenge_method: S256
+scope: console
+HTTP 302
+[Captures]
+inspector_request: header "Location" regex "^/ui/#/authorize/(.+)$"
+
+GET {{secured_url}}/_rustybin/oauth/requests/{{inspector_request}}
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.client_name" == "Rustybin MCP inspector"
+jsonpath "$.client_document.url" == "{{secured_url}}/.well-known/rustybin-inspector-client.json"
+
+POST {{secured_url}}/_rustybin/oauth/requests/{{inspector_request}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{"decision": "deny"}
+HTTP 200
+
+# The address 0.7.0 served it at is under a control plane: the outbound
+# policy never calls one, whatever the allowlist says.
+GET {{secured_url}}/_rustybin/oauth/authorize
+[Query]
+response_type: code
+client_id: {{secured_url}}/_rustybin/oauth/inspector-client.json
+redirect_uri: {{secured_url}}/ui/callback
+code_challenge: E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM
+code_challenge_method: S256
+HTTP 400
+[Asserts]
+body contains "outbound policy"
+body contains "control plane"
+# ANCHOR_END: inspector
+
+# ANCHOR: diagnostics
+# The hosts named for it: the check is content.
+GET {{secured_url}}/_rustybin/diagnostics
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.checks[?(@.id == 'client_documents')].status" contains "ok"
+
+# On with no host named: every document is refused, and the check says so.
+DELETE {{secured_url}}/_rustybin/settings/egress.allow
+Authorization: Bearer {{admin_token}}
+HTTP 200
+
+GET {{secured_url}}/_rustybin/diagnostics
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.checks[?(@.id == 'client_documents')].status" contains "warn"
+jsonpath "$.checks[?(@.id == 'client_documents')].message" contains "permits no host"
+jsonpath "$.checks[?(@.id == 'client_documents')].fix" contains "egress.allow"
+# ANCHOR_END: diagnostics
+
 # Back to how the instance was.
 DELETE {{secured_url}}/_rustybin/settings/oauth.client_metadata_documents
 Authorization: Bearer {{admin_token}}
 HTTP 200
 
-DELETE {{secured_url}}/_rustybin/settings/egress.allow
+# Off: no such check.
+GET {{secured_url}}/_rustybin/diagnostics
 Authorization: Bearer {{admin_token}}
 HTTP 200
+[Asserts]
+jsonpath "$.checks[*].id" not contains "client_documents"
 
 DELETE {{secured_url}}/_rustybin/settings/egress.allow_loopback
 Authorization: Bearer {{admin_token}}

@@ -209,6 +209,27 @@ only to hosts you named:
 {{#include ../examples/agent/client_documents.hurl:refused}}
 ```
 
+The [MCP inspector](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document)
+of another Rustybin is such a client: its document is at
+`/.well-known/rustybin-inspector-client.json` of that instance, outside its control
+plane, so naming that instance's host in `egress.allow` is all it takes. The address
+0.7.0 served the document at, `/_rustybin/oauth/inspector-client.json`, is refused
+here whatever the allowlist says, because the outbound policy never calls a
+`/_rustybin` path on any host (an inspector of 0.7.0 registers instead, as before).
+Here the instance takes its own inspector's document:
+
+```hurl
+{{#include ../examples/agent/client_documents.hurl:inspector}}
+```
+
+With the setting on and no host named, every document is refused before any call. The
+[diagnostics](troubleshooting.md#ask-the-instance-first) warn about it (the check
+`client_documents`, quiet while the setting is off):
+
+```hurl
+{{#include ../examples/agent/client_documents.hurl:diagnostics}}
+```
+
 The mock authorization server behind `/mcp/protected` (the data plane's demo identity
 provider) never fetches a client's URL: it knows its demo clients and the ones
 registered with it. To test a client's document flow, point the client at
@@ -754,7 +775,7 @@ set](#a-secret-at-an-agents-request); `assist_status` shows `{set, hint}`.
 
 | Tool | Permission | |
 |---|---|---|
-| `list_mcp_servers` | `mcp.inspect` | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids, and the inspector's [client ID metadata document](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document) (`client_document`: its URL, whether a server can use it, why not) |
+| `list_mcp_servers` | `mcp.inspect` | Every MCP server this instance serves with its auth, the relay's allowlist, the check ids, and the inspector's [client ID metadata document](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document) (`client_document`: its URL, the 0.7.0 address as `legacy_url`, whether a server can use it, why not) |
 | `mcp_call` | `mcp.inspect` | One JSON-RPC request to any MCP server (a path on this instance in process, or a URL through the relay) with the handshake the transport needs; credentials as headers or a saved connection. Another host is confirmed, and without admin rights gets read-only methods only (no `tools/call`). The answer is `untrusted_result` |
 | `run_mcp_checks` | `mcp.inspect` | The [inspector's check suite](mcp/inspector.md) against a server; the report is saved unless `save: false`. Another host is confirmed, and without admin rights the calls to tools are skipped. At most two suites run at once |
 | `list_mcp_check_runs` | `mcp.inspect` | The saved runs, or one report (under `untrusted_report`) |

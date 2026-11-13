@@ -88,11 +88,32 @@ Current MCP clients do not register with an authorization server: they name
 themselves with the `https` URL of a document that describes them, which the server
 fetches (a client ID metadata document). A server that takes one says
 `client_id_metadata_document_supported` in its metadata, and the inspector tests it
-the same way. The instance serves the inspector's document at an open route; it holds
-nothing secret, only the name and the console's callback as the one redirect URI:
+the same way. The instance serves the inspector's document at an open route,
+`GET /.well-known/rustybin-inspector-client.json`; it holds nothing secret, only the
+name and the console's callback as the one redirect URI:
 
 ```hurl
 {{#include ../../examples/mcp/inspector.hurl:client_document}}
+```
+
+The route is outside the control plane on purpose. An authorization server fetches the
+document itself, and a careful one refuses to call another service's control plane:
+the [outbound policy](../configuration.md#outbound-connections) of a Rustybin never
+calls a `/_rustybin` path on any host. At this address one Rustybin's inspector can
+sign in to another Rustybin's [management MCP server](../agent-mcp.md#sign-in-with-oauth)
+with a document. It needs no credential, no API key (also with `RUSTYBIN_REQUIRE_KEY`
+or in shared mode) and no session; like the other discovery documents it is counted by
+the plan limits and shows in live traffic.
+
+Rustybin 0.7.0 served the document at `GET /_rustybin/oauth/inspector-client.json`.
+That address keeps answering, with itself as the `client_id`, for a server or a saved
+connection that knows the inspector by it; the walk and the check always send the
+address under `/.well-known/`. `client_document.legacy_url` of
+`GET /_rustybin/mcp-servers` names it, and `rustybin mcp client-document --legacy`
+reads it:
+
+```hurl
+{{#include ../../examples/mcp/inspector.hurl:client_document_legacy}}
 ```
 
 The document's URL is the client id, so the walk makes no registration call and step 4
@@ -291,9 +312,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/mcp-servers` (with `client_document`), `GET /_rustybin/oauth/inspector-client.json` (open), `POST /_rustybin/mcp-relay` and `DELETE /_rustybin/mcp-relay/{session}`, `POST /_rustybin/mcp-relay/fetch`, `POST`, `GET /_rustybin/mcp-checks`, `GET`, `DELETE /_rustybin/mcp-checks/{id}`, `GET /_rustybin/mcp-connections`, `GET`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` |
+| API | `GET /_rustybin/mcp-servers` (with `client_document`), `GET /.well-known/rustybin-inspector-client.json` (open, outside the control plane; the 0.7.0 address `GET /_rustybin/oauth/inspector-client.json` still answers), `POST /_rustybin/mcp-relay` and `DELETE /_rustybin/mcp-relay/{session}`, `POST /_rustybin/mcp-relay/fetch`, `POST`, `GET /_rustybin/mcp-checks`, `GET`, `DELETE /_rustybin/mcp-checks/{id}`, `GET /_rustybin/mcp-connections`, `GET`, `PUT`, `DELETE /_rustybin/mcp-connections/{id}` |
 | Console | The **MCP inspector** view (servers, connections, the protocol tabs, the timeline, checks; **Client** in the OAuth form chooses a metadata document, registration or a given id); a mock's **MCP** tab opens it on the mock's server |
-| CLI | `rustybin mcp servers \| tools <target> \| call <target> <method> \| check <target> [--junit] \| runs \| run <id> \| delete-run <id> \| connections \| connection <id> \| save-connection [--oauth-client auto\|document\|registration\|given] \| delete-connection <id> \| fetch \| end-relay \| client-document` ([reference](../cli.md#mcp)) |
-| Management MCP | `list_mcp_servers` (with `client_document`: the document, its URL, whether a server can use it and why not), `mcp_call` (answers under `untrusted_result`), `run_mcp_checks` (the `client_document` check included) and `list_mcp_check_runs` (reports under `untrusted_report`), `list_mcp_connections` (each with its `auth.oauth.client`); the prompt `test_mcp_server` ([agent page](../agent-mcp.md)) |
+| CLI | `rustybin mcp servers \| tools <target> \| call <target> <method> \| check <target> [--junit] \| runs \| run <id> \| delete-run <id> \| connections \| connection <id> \| save-connection [--oauth-client auto\|document\|registration\|given] \| delete-connection <id> \| fetch \| end-relay \| client-document [--legacy]` ([reference](../cli.md#mcp)) |
+| Management MCP | `list_mcp_servers` (with `client_document`: the document, its URL, the 0.7.0 address as `legacy_url`, whether a server can use it and why not), `mcp_call` (answers under `untrusted_result`), `run_mcp_checks` (the `client_document` check included) and `list_mcp_check_runs` (reports under `untrusted_report`), `list_mcp_connections` (each with its `auth.oauth.client`); the prompt `test_mcp_server` ([agent page](../agent-mcp.md)) |
 | `rustybin.yaml` | Nothing: saved connections hold credentials and stay in `<state>/mcp-inspector.json`; the servers a document creates (mocks with MCP on) appear in the server list |
 | Environment | `RUSTYBIN_EGRESS_ALLOW` and `RUSTYBIN_EGRESS_ALLOW_LOOPBACK` for the relay's destinations, `RUSTYBIN_STATE_DIR` for saved connections and runs ([configuration](../configuration.md#outbound-connections)) |

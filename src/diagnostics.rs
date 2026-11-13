@@ -325,6 +325,11 @@ pub fn report(state: &AppState) -> Value {
         checks.push(check("sso", status, message, fix));
     }
 
+    // Client ID metadata documents: on, and a host the policy would call.
+    if let Some((status, message, fix)) = crate::control_oauth::client_docs::diagnostics(state) {
+        checks.push(check("client_documents", status, message, fix));
+    }
+
     // The harness engine.
     if let Some(h) = &state.harness {
         checks.push(match h.engine_problem() {
@@ -494,6 +499,70 @@ mod tests {
         assert!(r.to_string().contains("is not a settings document"));
         let r = report(&test_state_with(Config::for_tests()));
         assert_eq!(status_of(&r, "settings_file"), "ok");
+    }
+
+    #[test]
+    fn client_documents_on_with_nothing_allowed_is_warned() {
+        use crate::control_oauth::client_docs::SETTING;
+        use std::collections::BTreeMap;
+        let turn = |state: &AppState, on: bool| {
+            state
+                .settings
+                .update(
+                    BTreeMap::from([(SETTING.to_string(), json!(on))]),
+                    BTreeMap::new(),
+                    "test",
+                )
+                .expect("setting");
+        };
+        // Off (the default): no such question, whatever the allowlist.
+        let state = test_state_with(Config::for_tests());
+        let r = report(&state);
+        assert_eq!(status_of(&r, "client_documents"), "missing", "{r}");
+        // On with nothing allowed: a warning that says what was seen and the fix.
+        turn(&state, true);
+        let r = report(&state);
+        assert_eq!(status_of(&r, "client_documents"), "warn", "{r}");
+        let c = r["checks"]
+            .as_array()
+            .and_then(|a| a.iter().find(|c| c["id"] == "client_documents"))
+            .expect("the check");
+        let message = c["message"].as_str().expect("message");
+        assert!(message.contains(SETTING), "{message}");
+        assert!(message.contains("client_metadata"), "{message}");
+        assert!(
+            c["fix"]
+                .as_str()
+                .is_some_and(|f| f.contains("egress.allow")),
+            "{c}"
+        );
+        assert_eq!(r["status"], "warn");
+        // The loopback switch names no host: still nothing to call.
+        let mut c = Config::for_tests();
+        c.egress_allow_loopback = true;
+        let state = test_state_with(c);
+        turn(&state, true);
+        assert_eq!(status_of(&report(&state), "client_documents"), "warn");
+        // A host named at startup, or in the setting later: fine.
+        let mut c = Config::for_tests();
+        c.egress_allow = vec!["clients.example".into()];
+        let state = test_state_with(c);
+        turn(&state, true);
+        assert_eq!(status_of(&report(&state), "client_documents"), "ok");
+        let state = test_state_with(Config::for_tests());
+        turn(&state, true);
+        state
+            .settings
+            .update(
+                BTreeMap::from([("egress.allow".to_string(), json!(["clients.example"]))]),
+                BTreeMap::new(),
+                "test",
+            )
+            .expect("allow");
+        assert_eq!(status_of(&report(&state), "client_documents"), "ok");
+        // Off again: quiet again.
+        turn(&state, false);
+        assert_eq!(status_of(&report(&state), "client_documents"), "missing");
     }
 
     #[tokio::test]

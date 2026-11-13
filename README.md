@@ -752,7 +752,8 @@ gRPC `EchoService` listens on its own port (default `50051`) and, with
 | GET DELETE | `/_rustybin/mcp-checks/{id}` | MCP inspector: one saved check run (format=junit for JUnit) |
 | GET | `/_rustybin/mcp-connections` | MCP inspector: saved connections (credentials as {set, hint}) |
 | GET PUT DELETE | `/_rustybin/mcp-connections/{id}` | MCP inspector: one saved connection; PUT and DELETE need admin |
-| GET | `/_rustybin/oauth/inspector-client.json` | MCP inspector: its client ID metadata document (the client id the OAuth walk sends where a server supports one) |
+| GET | `/.well-known/rustybin-inspector-client.json` | MCP inspector: its client ID metadata document (the client id the OAuth walk sends where a server supports one) |
+| GET | `/_rustybin/oauth/inspector-client.json` | MCP inspector: its client document at the address 0.7.0 used (kept for saved connections; the walk sends /.well-known/rustybin-inspector-client.json) |
 | GET | `/_rustybin/registry` | Mock MCP registry: entries with their source and validity, the scenario, the sync snippet |
 | DELETE | `/_rustybin/registry/servers/{serverName}` | Mock MCP registry: remove a published entry (all versions, or ?version=); admin |
 | POST | `/_rustybin/registry/validate` | Validate a server.json document against the vendored schema and the registry's semantic checks |

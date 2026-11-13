@@ -252,6 +252,102 @@ async fn a_redirect_a_large_body_and_a_foreign_client_id_are_refused() {
     assert_eq!(hits.load(Ordering::SeqCst), 6);
 }
 
+/// A whole second instance on a free loopback port: its base URL.
+async fn other_instance() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    let app = test_app_with(test_state_with(Config::for_tests()));
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    base
+}
+
+#[tokio::test]
+async fn one_rustybin_takes_the_inspector_document_of_another() {
+    use crate::mcp::inspector::clientdoc;
+    // The other Rustybin, whose console's inspector signs in here.
+    let other = other_instance().await;
+    let (app, state) = instance(true);
+    turn(&state, true);
+
+    // What the other one's walk sends: its document's address outside the
+    // control plane, and the document's own redirect URI.
+    let client_id = clientdoc::client_id(&other);
+    let redirect = clientdoc::redirect_uri(&other);
+    assert_eq!(
+        client_id,
+        format!("{other}/.well-known/rustybin-inspector-client.json")
+    );
+    let resp = send(
+        &app,
+        "GET",
+        &authorize_url(&client_id, &redirect, Some("console")),
+        &[],
+        None,
+    )
+    .await;
+    let status = resp.status();
+    let loc = location(&resp);
+    let page = body_string(resp).await;
+    assert_eq!(status, StatusCode::FOUND, "{page}");
+    let id = loc.strip_prefix(CONSENT_PAGE).expect("consent page");
+
+    // The consent step: the other instance's inspector, by its own claim.
+    let bearer = format!("Bearer {ADMIN}");
+    let resp = send(
+        &app,
+        "GET",
+        &format!("{REQUESTS_PREFIX}{id}"),
+        &[("authorization", bearer.as_str())],
+        None,
+    )
+    .await;
+    let v = body_json(resp).await;
+    assert_eq!(v["client_name"], clientdoc::CLIENT_NAME);
+    assert_eq!(v["client_document"]["url"], client_id.as_str());
+    assert_eq!(
+        v["client_document"]["host"],
+        other.trim_start_matches("http://")
+    );
+
+    // The address 0.7.0 sent is under the other one's control plane: the
+    // outbound policy refuses it as it always did, before any call, in its
+    // own words.
+    let legacy = clientdoc::legacy_client_id(&other);
+    let policy = state
+        .egress
+        .resolve(&legacy, crate::egress::Purpose::ClientMetadata)
+        .await
+        .expect_err("the policy never calls a control plane");
+    assert_eq!(
+        policy.0,
+        "the target URL points at a Rustybin control plane (/_rustybin, /ui)"
+    );
+    let (status, _, page) = {
+        let resp = send(
+            &app,
+            "GET",
+            &authorize_url(&legacy, &redirect, Some("console")),
+            &[],
+            None,
+        )
+        .await;
+        (resp.status(), location(&resp), body_string(resp).await)
+    };
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(page.contains("outbound policy"), "{page}");
+    assert!(page.contains("Rustybin control plane"), "{page}");
+    // The document is there all the same, for a server that may fetch it.
+    let served: Value = reqwest::get(&legacy)
+        .await
+        .expect("the other instance")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(served["client_id"], legacy.as_str());
+}
+
 #[test]
 fn a_client_id_url_follows_the_rules() {
     assert!(client_docs::check_url("https://agent.example/client.json").is_ok());

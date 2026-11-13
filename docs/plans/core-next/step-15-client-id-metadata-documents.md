@@ -228,3 +228,131 @@ end-relay`, a flag on `mcp save-connection`), the description of `list_mcp_serve
 new tool), the regenerated `README.md` and `docs/src/cli.md`, the purposes table and the settings
 list of `docs/src/configuration.md`, `conformance/ui/console_e2e.py` (`run_client_documents`,
 called after `run_jwt`).
+
+## Follow-ups (built after 0.7.0)
+
+Two follow-ups the build notes above named, built on 2026-11-13 at the owner's word. The owner
+also confirmed one thing that stays: the control plane takes plain `http` for a client document
+on a loopback host (the outbound policy still refuses loopback unless allowed).
+
+**A. The diagnostics check `client_documents`.** With `oauth.client_metadata_documents` on,
+`GET /_rustybin/diagnostics` (and so `rustybin doctor`, `diagnose_instance` and Management,
+Diagnostics, none of which needed code) gains one check: `warn` when the outbound policy permits
+no host for the purpose `client_metadata` (it says what was seen and the fix: name the hosts in
+`egress.allow`, or turn the setting off), `ok` when it permits one. No check while the setting is
+off. The judgement is `control_oauth::client_docs::diagnostics`; whether anything is permitted is
+the policy's own answer, the new `Egress::permits_any(purpose)`, which reads the same private
+`Egress::scope` (the rule, the merged allowlist, unrestricted or not) that `dry_check` and
+`resolve` now read, so there is one reading of the lists and not three.
+
+**B. A second address for the inspector's document, outside the control plane.**
+`GET /.well-known/rustybin-inspector-client.json` (`clientdoc::DOCUMENT_PATH`,
+`control_oauth::INSPECTOR_CLIENT_PATH`) serves the document; the address of 0.7.0,
+`GET /_rustybin/oauth/inspector-client.json` (`LEGACY_DOCUMENT_PATH`,
+`INSPECTOR_CLIENT_LEGACY_PATH`), keeps answering. One function builds both
+(`clientdoc::document_at`), so they differ in `client_id` only, each naming its own URL.
+
+- **Why that path.** `/oauth/*` on the data plane is the mock identity provider's namespace
+  (`/oauth/token`, `/oauth/register`, ...): a client document of the console's inspector there
+  would read as part of the demo provider. `/.well-known/` already holds what this instance says
+  about itself for others to fetch (`/.well-known/rustybin-harness`, the management server's
+  OAuth metadata, the agent card), the `rustybin-` prefix keeps it clear of registered names, and
+  no route or wildcard collides with it.
+- **Which address the walk sends: always the new one.** `clientdoc::client_id` is the one place
+  that says it, and everything follows it: `client_document.url` of `GET /_rustybin/mcp-servers`
+  and `list_mcp_servers`, the walk's step 4 (`ui/lib/mcpauth.js` reads `url`, so no console code
+  changed), the `client_document` check, `rustybin mcp client-document`. One rule works
+  everywhere: a server that could fetch the old address can fetch the new one, and a server that
+  refuses control-plane paths can fetch only the new one. The cost is that a server which keyed
+  a consent or a grant to the old URL sees a new client and asks again once. The old route stays
+  for servers and saved connections that kept the URL (a saved connection with the old URL as
+  its given client id still works, since the document is still there); `client_document` also
+  answers `legacy_url`, and `rustybin mcp client-document --legacy` reads it.
+- **What applies to a data-plane route.** The API key layer: the new path is in
+  `control_oauth::is_discovery_path`, so `GET` and `HEAD` need no key with
+  `RUSTYBIN_REQUIRE_KEY` or in shared mode, exactly like the management server's discovery
+  documents; nothing else was opened (the test asks its neighbours). No session is involved.
+  Like those documents it is counted by the plan limits, captured by the inspector and open
+  cross-origin (the data plane's CORS policy): nothing was exempted there, since the other
+  discovery documents are not.
+- **The proof.** `one_rustybin_takes_the_inspector_document_of_another`
+  (`src/control_oauth/tests/client_docs.rs`): a second whole instance on a loopback port; the
+  first, with the setting on and `127.0.0.1` allowed, takes the second's document at the new
+  address and reaches the consent step (the consent API names the inspector and the other
+  instance's host); the old address is refused with the policy's own sentence ("the target URL
+  points at a Rustybin control plane (/_rustybin, /ui)"), asserted on `Egress::resolve` directly
+  and on the error page. `docs/examples/agent/client_documents.hurl` shows the same with one
+  instance as both (anchor `inspector`).
+
+Where this differs from the brief, and why:
+
+- **No console code changed.** The walk, the form's hint and the consent view already show what
+  the server answers (`client_document.url`, the consent API's `client_document`), so they follow
+  without an edit. The browser check's expected URL changed (`run_client_documents`).
+- **The CLI gained a switch**, `mcp client-document --legacy`, so the command still covers the
+  old route (the parity test wants a command for every control route) and a person can read it.
+- **`client_document` gained `legacy_url`**, so a tool or a person sees the old address without
+  knowing it.
+- **The check appears whenever the setting is on**, also on an instance whose OAuth sign-in is
+  off (control auth `open`): the setting is on and the allowlist is empty either way.
+
+Not built: a redirect from the old address to the new one (a document must be served, not
+redirected to: a fetching server follows none); telling a server that knew the old URL that the
+two are one client (there is no such mechanism); an exemption from plan limits.
+
+Tests: `client_documents_on_with_nothing_allowed_is_warned`,
+`a_purpose_permits_something_only_when_a_host_is_named`,
+`the_address_of_0_7_0_still_answers_and_names_itself`,
+`the_document_needs_no_key_and_opens_nothing_else` and the two-instance test were written with
+the code, and each protection was then removed once and its test seen to fail: `permits_any`
+answering yes (the first two), the new path out of `is_discovery_path` (the key test), the old
+route serving the new document (`the_address_of_0_7_0...`), `client_id` naming the old address
+(the two-instance test and four of the existing document tests), the check not quiet while off
+(the diagnostics test). Not seen failing by removal: the policy's refusal of `/_rustybin` paths,
+which is the policy's own and was not touched.
+
+### For the merge
+
+**`docs/src/changelog.md`** (Unreleased):
+
+```markdown
+New:
+
+- **MCP inspector: one Rustybin signs in to another with a client document.** The inspector's
+  client ID metadata document is now served at `GET /.well-known/rustybin-inspector-client.json`,
+  outside the control plane, and the OAuth walk and the `client_document` check send that URL as
+  the client id. An authorization server that refuses to call a control plane, as a Rustybin's
+  outbound policy does, can fetch it: name the other instance's host in `egress.allow` and turn
+  `oauth.client_metadata_documents` on. No API key is needed for it. `client_document` of
+  `GET /_rustybin/mcp-servers` gains `legacy_url`; `rustybin mcp client-document --legacy`.
+- **Diagnostics: `client_documents`.** With `oauth.client_metadata_documents` on and no host
+  permitted for the purpose `client_metadata`, the diagnostics warn that every client's document
+  is refused and say the fix. Quiet while the setting is off.
+
+Changed:
+
+- The inspector's client id is the new address. `GET /_rustybin/oauth/inspector-client.json`
+  (0.7.0) keeps answering with itself as `client_id`.
+```
+
+**Upgrade note**: an authorization server that remembered the inspector by the 0.7.0 URL (a
+consent, a grant) sees a new client id after the upgrade and asks once more. Nothing to do on
+the instance; saved connections keep working.
+
+**`docs/src/roadmap.md`**: remove the two candidates (a second address for the inspector's
+document; a diagnostics check for the setting on with an empty allowlist).
+
+**`CLAUDE.md`**, added to the step 15 paragraph: the inspector's document is at
+`/.well-known/rustybin-inspector-client.json` (`clientdoc::DOCUMENT_PATH`), which is what
+`clientdoc::client_id` and so the walk and the check send; the 0.7.0 address
+(`LEGACY_DOCUMENT_PATH`) is served and never sent; both come from `clientdoc::document_at`, so a
+field added to the document is in both and each names its own URL as `client_id`; a document a
+server must fetch never lives under `/_rustybin` or `/ui` (the outbound policy calls neither on
+any host); "does this purpose permit anything" is `Egress::permits_any` (what one URL is told is
+`Egress::dry_check`), never a reading of `egress.allow`.
+
+**Shared tables this touched** (for conflicts): `COMMANDS` (the row `mcp client-document`: a
+flag and a second route), the description of `list_mcp_servers` in `TOOLS` (no new tool), the
+catalogue and OpenAPI of `src/mcp/inspector/mod.rs` (one more route), the regenerated `README.md`
+and `docs/src/cli.md`, the checks table of `docs/src/troubleshooting.md`. `COVERAGE` and
+`UNCOVERED` are unchanged (the new route is not a control route).
