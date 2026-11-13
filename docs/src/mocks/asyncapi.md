@@ -230,13 +230,38 @@ The routes of this page are for event mocks only:
 
 An event mock has no operations, so the parts of a mock built on them do not apply to it:
 its MCP server has no tools, and mocked security, stateful data, drift checks and
-collections have nothing to work on.
+collections have nothing to work on. Asking for a collection of one is answered `409`
+with the reason `asyncapi`, never an empty file.
+
+## On the dev portal
+
+Published on the [dev portal](../portal.md), an event mock is an **event API**
+(`mock:<name>`, kind `event`, under **Event APIs**). Its page is its channels: each
+one's address and URL, what Rustybin publishes on it and how often, what it accepts,
+an example of every message, and how to connect (a WebSocket, server-sent events with
+`curl -N`, a `POST` of a valid message). There is no Try it, no collection and no API
+reference viewer, which are made from operations.
+
+```hurl
+{{#include ../../examples/mocks/asyncapi.hurl:portal}}
+```
+
+```hurl
+{{#include ../../examples/mocks/asyncapi.hurl:no_collection}}
+```
+
+A channel answers whoever connects (mocked security guards operations), so an event
+API cannot be **closed** on the portal: the publish answers `409` with the reason
+`open_channels`. The exception is an instance that asks every data-plane call for an
+API key (`RUSTYBIN_REQUIRE_KEY` or shared mode); there a closed event API shows its
+channels and messages to everyone and its connection snippets to signed-in readers.
 
 ## On every surface
 
 | Surface | Where |
 |---|---|
 | API | A mock's create, `PATCH` and apply take an AsyncAPI document and `channels`; `/events/{name}/{channel}` (WebSocket, SSE, `POST`); `GET /_rustybin/mocks/{name}/channels`, `GET .../channels/{channel}/messages`, `POST .../channels/{channel}/publish`; `GET` and `POST /_rustybin/mocks/{name}/subscribers`, `DELETE .../subscribers/{id}` |
+| Dev portal | Publish `mock:<name>`: an event API with its channels ([above](#on-the-dev-portal)) |
 | Console | **Mock APIs**: drop an AsyncAPI file. The mock's **Channels** tab: each channel's URL, what it publishes and accepts, its pattern and faults (**Save to the draft**), **Publish the next message**, a composer that publishes a valid message as a client, the live feed of messages, and the webhook subscribers. **Deploy report** lists the channels. Management, General has the caps under **Event mocks** |
 | CLI | `rustybin mocks create <name> --spec <asyncapi file>`, `rustybin mocks channels <name>`, `rustybin mocks events <name> <channel> [--follow]`, `rustybin mocks publish <name> <channel> [--data JSON] [--count N]`, `rustybin mocks subscribers <name>`, `rustybin mocks subscribe <name> <channel> --webhook URL`, `rustybin mocks unsubscribe <name> <id>` ([reference](../cli.md#mocks)) |
 | Management MCP | `create_mock` and `update_mock` take an AsyncAPI document and `channels`; `list_channels`, `list_channel_messages` (payloads under `untrusted_*`), `publish_event`, `list_event_subscribers`, `add_event_subscriber` (confirmed: it sends messages out), `remove_event_subscriber` |

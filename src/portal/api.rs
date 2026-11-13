@@ -468,6 +468,9 @@ async fn download(
     let Some(c) = s.live.as_ref() else {
         return not_found();
     };
+    if c.spec.events.is_some() {
+        return no_operations(name, "collection");
+    }
     // Collections carry the credentials.
     if !reader && entry_closed(&state, &entry) {
         return locked(&state, &headers);
@@ -536,6 +539,9 @@ async fn reference(
         )
             .into_response();
     };
+    if c.spec.events.is_some() {
+        return no_operations(&s.name, "API reference");
+    }
     let (mut server, idp) = crate::mocks::handlers::served_bases(
         &c,
         &s.name,
@@ -558,6 +564,20 @@ async fn reference(
         &title,
         &crate::mocks::handlers::served_spec(&c, &server, &idp, &s.name),
     )
+}
+
+/// The answer for what an event API has none of: a collection or the
+/// reference viewer are made from operations, and its document has
+/// channels.
+fn no_operations(name: &str, what: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": format!("{name:?} is an event API: it has channels, not operations, so there is no {what} of it. Its channels are on its portal page"),
+            "reason": "event_api",
+        })),
+    )
+        .into_response()
 }
 
 // ── Control plane ───────────────────────────────────────────────────
@@ -691,7 +711,7 @@ pub fn control_json(state: &AppState, caller: &crate::mocks::selfservice::Caller
         }
         let c = items::Candidate {
             id: e.key.clone(),
-            kind: e.id.kind(),
+            kind: items::kind_of(state, &e.id),
             title: e.published.title.clone().unwrap_or_else(|| e.key.clone()),
             summary: String::new(),
             state: "missing".into(),
@@ -842,6 +862,16 @@ fn check_closable(state: &AppState, id: &ItemId) -> Result<(), ServiceError> {
     let Some(u) = super::unclosable(super::keyed(&state.config), &live) else {
         return Ok(());
     };
+    if u.reason == "open_channels" {
+        // No security to turn on: nothing a `secure: true` could do.
+        return Err(ServiceError::with_body(
+            StatusCode::CONFLICT,
+            json!({
+                "error": format!("mock {name:?} cannot be closed: {}, so a closed entry would still answer callers who never signed in to the portal. Only an instance that requires an API key on every call (RUSTYBIN_REQUIRE_KEY or shared mode) can close an event API", u.message),
+                "reason": u.reason,
+            }),
+        ));
+    }
     Err(ServiceError::with_body(
         StatusCode::CONFLICT,
         json!({
@@ -939,12 +969,12 @@ pub async fn secure_mock(svc: &Svc, name: &str) -> Result<bool, ServiceError> {
         sec.mode = SecurityMode::ApiKey;
     }
     if let Some(u) = why(&sec) {
-        let why = u.message;
+        let why = &u.message;
         return Err(ServiceError::with_body(
             StatusCode::CONFLICT,
             json!({
                 "error": format!("mock {name:?} cannot be closed even with its security on: {why}"),
-                "reason": "open_operations",
+                "reason": u.reason,
             }),
         ));
     }
@@ -1209,7 +1239,7 @@ pub fn catalog() -> Vec<Endpoint> {
              title, summary (Markdown), tags, contact, order, credentials (show a mock's demo \
              credentials), access (open, or closed: everyone reads it, only portal readers use \
              it). A mock closes only when every call needs an API key or Basic user of its own \
-             (409 security_off, default_credentials, obtainable_credentials or open_operations \
+             (409 security_off, default_credentials, obtainable_credentials, open_operations or, for an event mock, open_channels \
              otherwise: JWTs of the built-in identity provider and the demo client certificate \
              are anyone's); secure: true turns its security on with random credentials in place \
              of the defaults (api_key mode unless the spec's or basic mode closes it) and deploys \
@@ -1382,7 +1412,7 @@ pub fn openapi_paths() -> Value {
                 "responses": {
                     "200": { "description": "Updated" }, "201": { "description": "Published" },
                     "400": { "description": "Invalid id or metadata" }, "403": { "description": "Not allowed" },
-                    "404": { "description": "Unknown mock" }, "409": { "description": "Defined in the config file, the portal is full, a mock that cannot be closed (security_off, default_credentials, obtainable_credentials, open_operations), or a draft not deployed (secure)" }
+                    "404": { "description": "Unknown mock" }, "409": { "description": "Defined in the config file, the portal is full, a mock that cannot be closed (security_off, default_credentials, obtainable_credentials, open_operations, open_channels), or a draft not deployed (secure)" }
                 }
             },
             "delete": {
@@ -1428,12 +1458,12 @@ pub fn openapi_paths() -> Value {
         "/portal/api/items/{id}/collections/{format}": { "get": {
             "tags": ["Docs"], "summary": "A published mock as a collection", "operationId": "getPortalCollection",
             "parameters": [id_param, { "name": "format", "in": "path", "required": true, "schema": { "type": "string", "enum": crate::mocks::collections::FORMATS.iter().map(|(f, _, _)| *f).collect::<Vec<_>>() } }],
-            "responses": { "200": { "description": "The collection (attachment)" }, "401": { "description": "A closed item, not signed in (collections carry the credentials)" }, "403": { "description": "Signed in without portal.read" }, "404": { "description": "Not published, or an unknown format" } }
+            "responses": { "200": { "description": "The collection (attachment)" }, "401": { "description": "A closed item, not signed in (collections carry the credentials)" }, "403": { "description": "Signed in without portal.read" }, "404": { "description": "Not published, an unknown format, or an event API (reason event_api: it has channels, not operations)" } }
         } },
         "/portal/reference/{id}": { "get": {
             "tags": ["Docs"], "summary": "A published mock's API reference", "operationId": "getPortalReference",
             "parameters": [id_param],
-            "responses": { "200": { "description": "HTML" }, "401": { "description": "portal.auth=password, not signed in" }, "404": { "description": "Not published" } }
+            "responses": { "200": { "description": "HTML" }, "401": { "description": "portal.auth=password, not signed in" }, "404": { "description": "Not published, or an event API (reason event_api: it has channels, not operations)" } }
         } },
         "/portal/api/login": { "post": {
             "tags": ["Docs"], "summary": "Dev portal sign-in", "operationId": "portalLogin",

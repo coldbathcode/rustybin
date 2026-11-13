@@ -1037,3 +1037,203 @@ async fn rotating_host_names_cannot_render_the_catalogue_without_bound() {
         StatusCode::OK
     );
 }
+
+// ── Event APIs (mocks made from an AsyncAPI document) ───────────────
+
+/// Two channels: one Rustybin publishes on, one it accepts messages on.
+pub(super) fn event_doc() -> Value {
+    json!({
+        "asyncapi": "3.0.0",
+        "info": { "title": "Order events", "version": "1.0.0", "description": "What happens to an order." },
+        "channels": {
+            "created": {
+                "address": "orders/created",
+                "description": "Every new order.",
+                "messages": { "orderCreated": {
+                    "name": "orderCreated",
+                    "payload": { "type": "object", "required": ["id"], "properties": { "id": { "type": "integer", "minimum": 1 } } },
+                    "examples": [{ "payload": { "id": 41 } }]
+                } }
+            },
+            "cancel": {
+                "address": "orders/cancel",
+                "messages": { "orderCancel": {
+                    "name": "orderCancel",
+                    "payload": { "type": "object", "required": ["id"], "properties": { "id": { "type": "integer" } } }
+                } }
+            }
+        },
+        "operations": {
+            "sendCreated": { "action": "send", "channel": { "$ref": "#/channels/created" } },
+            "receiveCancel": { "action": "receive", "channel": { "$ref": "#/channels/cancel" } }
+        }
+    })
+}
+
+/// An event mock has channels and no operations: the portal lists it as
+/// an event API and its page is its channels, never an API with nothing in
+/// it; what is made from operations (collections, the reference viewer)
+/// says so instead of answering something empty.
+#[tokio::test]
+async fn an_event_mock_is_published_as_an_event_api_with_its_channels() {
+    let (app, _) = app();
+    let body = json!({ "name": "order-events", "spec": event_doc() });
+    let (status, _, v) = call(&app, "POST", "/_rustybin/mocks", &[], Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(v["kind"], "asyncapi", "{v}");
+
+    // The console's list: its own kind, and why it cannot be closed.
+    let (_, _, control) = call(&app, "GET", "/_rustybin/portal", &[], None).await;
+    let cand = control["items"]
+        .as_array()
+        .and_then(|l| l.iter().find(|i| i["id"] == "mock:order-events"))
+        .expect("candidate");
+    assert_eq!(cand["kind"], "event", "{cand}");
+    assert_eq!(cand["title"], "Order events", "{cand}");
+    assert_eq!(cand["secured"], false, "{cand}");
+    assert_eq!(cand["closable"]["reason"], "open_channels", "{cand}");
+
+    let (status, _, v) = call(
+        &app,
+        "PUT",
+        "/_rustybin/portal/items/mock:order-events",
+        &[],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let (status, _, _) = call(
+        &app,
+        "PUT",
+        "/_rustybin/portal/items/mock:petstore",
+        &[],
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _, catalog) = call(&app, "GET", "/portal/api/catalog", &[], None).await;
+    assert_eq!(status, StatusCode::OK, "{catalog}");
+    let kinds: Vec<&str> = catalog["kinds"]
+        .as_array()
+        .expect("kinds")
+        .iter()
+        .filter_map(|k| k["id"].as_str())
+        .collect();
+    assert_eq!(kinds, ["api", "event"], "{catalog}");
+    assert_eq!(item(&catalog, "mock:petstore").expect("api")["kind"], "api");
+    let it = item(&catalog, "mock:order-events").expect("event item");
+    assert_eq!(it["kind"], "event", "{it}");
+    assert_eq!(it["title"], "Order events");
+    let d = &it["detail"];
+    assert_eq!(d["asyncapi"], "3.0.0", "{d}");
+    assert_eq!(d["base_url"], "http://rustybin.test/events/order-events");
+    // Nothing of an API with operations, least of all an empty list.
+    for key in [
+        "operations",
+        "downloads",
+        "reference_path",
+        "spec_url",
+        "mcp",
+        "security",
+    ] {
+        assert!(d.get(key).is_none(), "{key}: {d}");
+    }
+    assert!(!it.to_string().contains("/collections/"), "{it}");
+    let channels = d["channels"].as_array().expect("channels");
+    assert_eq!(channels.len(), 2, "{d}");
+    let created = channels
+        .iter()
+        .find(|c| c["id"] == "orders-created")
+        .expect("created");
+    assert_eq!(created["address"], "orders/created");
+    assert_eq!(created["description"], "Every new order.");
+    assert_eq!(created["pattern"], "every");
+    assert_eq!(
+        created["url"],
+        "http://rustybin.test/events/order-events/orders-created"
+    );
+    assert_eq!(
+        created["ws_url"],
+        "ws://rustybin.test/events/order-events/orders-created"
+    );
+    assert_eq!(created["send"][0]["name"], "orderCreated");
+    // The document's example, as the channel publishes it.
+    let example: Value =
+        serde_json::from_str(created["send"][0]["example"].as_str().expect("example"))
+            .expect("json");
+    assert_eq!(example, json!({ "id": 41 }));
+    assert_eq!(created["receive"], json!([]));
+    assert!(created["connect"]["websocket"]
+        .as_str()
+        .is_some_and(|s| s.contains("ws://rustybin.test/events/order-events/orders-created")));
+    assert!(created["connect"]["sse"]
+        .as_str()
+        .is_some_and(|s| s.starts_with("curl -N ") && s.contains("Accept: text/event-stream")));
+    assert!(created["connect"]["publish"].is_null(), "{created}");
+    let cancel = channels
+        .iter()
+        .find(|c| c["id"] == "orders-cancel")
+        .expect("cancel");
+    assert_eq!(cancel["pattern"], "off");
+    assert_eq!(cancel["send"], json!([]));
+    assert_eq!(cancel["receive"][0]["name"], "orderCancel");
+    let publish = cancel["connect"]["publish"].as_str().expect("publish");
+    assert!(publish.starts_with("curl -X POST "), "{publish}");
+
+    // The address the page gives is the channel, and the message it
+    // suggests is one the channel accepts.
+    let path = created["url"]
+        .as_str()
+        .and_then(|u| u.strip_prefix("http://rustybin.test"))
+        .expect("path");
+    let (status, _, described) = call(&app, "GET", path, &[], None).await;
+    assert_eq!(status, StatusCode::OK, "{described}");
+    assert_eq!(described["address"], "orders/created");
+    let sample: Value =
+        serde_json::from_str(cancel["receive"][0]["example"].as_str().expect("sample"))
+            .expect("json");
+    let path = cancel["url"]
+        .as_str()
+        .and_then(|u| u.strip_prefix("http://rustybin.test"))
+        .expect("path");
+    let (status, _, v) = call(&app, "POST", path, &[], Some(sample)).await;
+    assert!(status.is_success(), "{status}: {v}");
+
+    // Made from operations: said, not answered empty.
+    for uri in [
+        "/portal/api/items/mock:order-events/collections/hurl",
+        "/portal/reference/mock:order-events",
+    ] {
+        let (status, _, v) = call(&app, "GET", uri, &[], None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {v}");
+        assert_eq!(v["reason"], "event_api", "{uri}: {v}");
+    }
+    for (format, _, _) in crate::mocks::collections::FORMATS {
+        let uri = format!("/_rustybin/mocks/order-events/collections/{format}");
+        let (status, _, v) = call(&app, "GET", &uri, &[], None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{uri}: {v}");
+        assert_eq!(v["reason"], "asyncapi", "{uri}: {v}");
+    }
+
+    // A channel answers whoever connects: no security to close it with.
+    for body in [
+        json!({ "access": "closed" }),
+        json!({ "access": "closed", "secure": true }),
+    ] {
+        let (status, _, v) = call(
+            &app,
+            "PUT",
+            "/_rustybin/portal/items/mock:order-events",
+            &[],
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{v}");
+        assert_eq!(v["reason"], "open_channels", "{v}");
+        assert!(v.get("fix").is_none(), "{v}");
+    }
+    let (_, _, catalog) = call(&app, "GET", "/portal/api/catalog", &[], None).await;
+    let it = item(&catalog, "mock:order-events").expect("still published");
+    assert_eq!(it["access"], "open", "{it}");
+}

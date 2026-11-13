@@ -1253,6 +1253,73 @@ def run_theme(browser, theme):
 
     step("dev portal: publish, read, try, download", dev_portal)
 
+    def portal_event_api():
+        # An AsyncAPI mock on the portal is an event API: its page is its
+        # channels (what each publishes and accepts, how to connect), with
+        # no operations, no Try it and no collections.
+        name = f"portal-events-{theme}"
+        item = "mock:" + name
+        doc = {
+            "asyncapi": "3.0.0",
+            "info": {"title": "Order events", "version": "1.0.0"},
+            "channels": {
+                "created": {"address": "orders/created", "messages": {"orderCreated": {"name": "orderCreated", "payload": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}}}}},
+                "cancel": {"address": "orders/cancel", "messages": {"orderCancel": {"name": "orderCancel", "payload": {"type": "object", "required": ["id"], "properties": {"id": {"type": "integer"}}}}}},
+            },
+            "operations": {
+                "sendCreated": {"action": "send", "channel": {"$ref": "#/channels/created"}},
+                "receiveCancel": {"action": "receive", "channel": {"$ref": "#/channels/cancel"}},
+            },
+        }
+        http("DELETE", f"/_rustybin/mocks/{name}")
+        assert http("POST", "/_rustybin/mocks", {"Content-Type": "application/json"}, json.dumps({"name": name, "spec": doc})) == 201
+        assert http("PUT", "/_rustybin/portal/items/" + item, {"Content-Type": "application/json"}, "{}") == 201
+        try:
+            # The console lists it under its own kind, and says why it cannot be closed.
+            # (The step before left the page on this tab: load it again.)
+            page.goto(BASE + "/ui/#/manage/portal")
+            page.reload()
+            page.wait_for_selector(f"[data-portal-item='{item}']")
+            expect(page.locator("h3.section-title", has_text="Event APIs")).to_be_visible()
+            page.locator(f"[data-portal-item='{item}']").click()
+            page.wait_for_selector("#portal-access-open")
+            page.check("#portal-access-closed")
+            expect(page.locator("#portal-closable")).to_contain_text("cannot be closed")
+            expect(page.locator("#portal-publish")).not_to_have_text("Turn on security and close")
+            page.keyboard.press("Escape")
+            ctx2 = browser.new_context(viewport={"width": 1280, "height": 860}, color_scheme=theme)
+            try:
+                p2 = ctx2.new_page()
+                p2.set_default_timeout(TIMEOUT)
+                p2.on("console", on_console)
+                p2.on("pageerror", lambda e: console_errors.append(f"[{theme}] portal event API uncaught: {e}"))
+                p2.goto(BASE + "/portal/")
+                p2.wait_for_selector("#kind-event")
+                p2.locator(f".item-card[data-item='{item}']").click()
+                ch = p2.locator("details.op[data-channel='orders-created']")
+                ch.wait_for()
+                expect(ch.locator("summary")).to_contain_text("orders/created")
+                ch.locator("summary").click()
+                expect(ch.locator("[data-message='orderCreated']")).to_be_visible()
+                connect = ch.locator("[data-connect='orders-created']")
+                expect(connect).to_contain_text(f"/events/{name}/orders-created")
+                expect(connect).to_contain_text("text/event-stream")
+                cancel = p2.locator("details.op[data-channel='orders-cancel']")
+                cancel.locator("summary").click()
+                expect(cancel.locator("[data-connect='orders-cancel']")).to_contain_text("curl -X POST")
+                assert p2.locator("button[data-format]").count() == 0, "an event API offers collections"
+                assert p2.locator(".try").count() == 0, "an event API offers Try it"
+                assert p2.locator("text=0 operations").count() == 0, "an event API shows an empty operations list"
+                shot(p2, theme, "17-portal-event-api")
+                assert_icons_sized(p2, "the portal event API page")
+            finally:
+                ctx2.close()
+        finally:
+            http("DELETE", "/_rustybin/portal/items/" + item)
+            http("DELETE", f"/_rustybin/mocks/{name}")
+
+    step("dev portal: an AsyncAPI mock as an event API with its channels", portal_event_api)
+
     def gateway_scenarios():
         # Prepare a caching run: the upstream mock exists and the steps show;
         # a check through a gateway the egress policy does not allow is

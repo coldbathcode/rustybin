@@ -24,8 +24,8 @@ const SIGNIN = meta('signin') === 'true';
 const CRED_KEY = 'rustybin-portal-credential';
 const THEME_KEY = 'rustybin-portal-theme';
 const KEY_HEADER = 'X-Rustybin-Key';
-const KIND_ICONS = { api: 'mock', mcp: 'mcp', llm: 'ai', agent: 'a2a', tools: 'explorer', registry: 'data' };
-const KIND_LABELS = { api: 'API', mcp: 'MCP server', llm: 'LLM', agent: 'Agent', tools: 'Tools', registry: 'Registry' };
+const KIND_ICONS = { api: 'mock', event: 'traffic', mcp: 'mcp', llm: 'ai', agent: 'a2a', tools: 'explorer', registry: 'data' };
+const KIND_LABELS = { api: 'API', event: 'Event API', mcp: 'MCP server', llm: 'LLM', agent: 'Agent', tools: 'Tools', registry: 'Registry' };
 const FORMAT_LABELS = { postman: 'Postman', hurl: 'Hurl', curl: 'curl', http: '.http', k6: 'k6', bruno: 'Bruno', insomnia: 'Insomnia' };
 
 const viewEl = document.getElementById('view');
@@ -323,7 +323,7 @@ function itemBadges(it) {
   if (it.access === 'closed') out.push(h('span', { class: 'badge ' + (isLocked(it) ? 'warn' : 'ok'), title: isLocked(it) ? 'Closed: sign in to use it' : 'Closed: you are signed in', 'data-access': 'closed' }, icon('lock'), isLocked(it) ? 'closed' : 'unlocked'));
   if (it.new) out.push(badge('new', 'ok'));
   if (it.visitor) out.push(badge('visitor', 'warn'));
-  if (it.kind === 'api' && it.detail && it.detail.state === 'off') out.push(badge('switched off', 'err'));
+  if ((it.kind === 'api' || it.kind === 'event') && it.detail && it.detail.state === 'off') out.push(badge('switched off', 'err'));
   for (const t of it.tags || []) out.push(h('span', { class: 'tag' }, t));
   return out;
 }
@@ -475,8 +475,10 @@ function itemView(id) {
         h('div', { class: 'row', style: { flexWrap: 'wrap', gap: '6px', marginTop: '8px' } }, ...itemBadges(it)),
         it.summary ? renderMarkdown(it.summary) : null,
         it.contact ? h('p', { class: 'small muted' }, 'Contact: ', it.contact) : null)));
-  const lockedLine = isLocked(it) ? lockedNotice('Read everything here; Try it, the credentials' + (it.kind === 'api' ? ', the collections' : '') + ' and the connection snippets unlock') : null;
+  const lockedLine = isLocked(it) ? lockedNotice(it.kind === 'event' ? 'Read every channel and message here; the connection snippets unlock'
+    : 'Read everything here; Try it, the credentials' + (it.kind === 'api' ? ', the collections' : '') + ' and the connection snippets unlock') : null;
   const body = it.kind === 'api' ? apiPage(it)
+    : it.kind === 'event' ? eventPage(it)
     : it.kind === 'mcp' ? mcpPage(it)
       : it.kind === 'llm' ? llmPage(it)
         : it.kind === 'agent' ? agentPage(it)
@@ -604,6 +606,80 @@ function apiPage(it) {
   if (d.registry) {
     el.appendChild(card('MCP registry', {}, h('p', { class: 'small', style: { margin: 0 } }, 'This server is listed in the mock MCP registry: ', h('a', { href: d.registry.search_url, target: '_blank', rel: 'noopener' }, d.registry.search_url))));
   }
+  return el;
+}
+
+// How a channel publishes, in words.
+const PATTERN_TEXT = {
+  every: (c) => 'a message every ' + fmtMs(c.every_ms) + ' while somebody listens',
+  burst: () => 'bursts of messages while somebody listens',
+  on_receive: () => 'a message in answer to each one it receives',
+  off: () => 'nothing on its own',
+};
+
+function messageList(list, emptyText) {
+  if (!list.length) return h('p', { class: 'muted small', style: { margin: 0 } }, emptyText);
+  return h('div', { class: 'stack-sm' }, ...list.map((m) => h('div', { 'data-message': m.name },
+    h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
+      h('span', { class: 'mono small' }, m.name),
+      m.title ? h('span', { class: 'small muted' }, m.title) : null,
+      m.content_type ? badge(m.content_type, 'outline') : null,
+      m.unsupported_format ? badge('schema format not generated', 'warn') : null),
+    m.example ? codeBlock(m.example, 'json', 'short')
+      : h('p', { class: 'muted small', style: { margin: 0 } }, m.example_too_long ? 'The example is too long to show here.' : 'No example.'))));
+}
+
+/** A mock made from an AsyncAPI document: channels, not operations. */
+function eventPage(it) {
+  const d = it.detail;
+  const channels = d.channels || [];
+  const el = h('div', { class: 'stack' });
+  el.appendChild(card('Overview', {},
+    kvgrid([
+      ['Channels at', h('span', { class: 'row nowrap' }, h('span', { class: 'mono break' }, d.base_url + '/{channel}'), copyButton(d.base_url, { icon: true, title: 'Copy the base URL' }))],
+      ['API', d.api_title + ' ' + d.version],
+      ['Document', 'AsyncAPI ' + d.asyncapi + ((d.protocols || []).length ? ' (servers: ' + d.protocols.join(', ') + ')' : '')],
+      ['Served over', 'WebSocket, server-sent events and POST, whatever protocol the document names'],
+      ['Authentication', 'None of the mock\'s own: a channel answers whoever connects.'],
+      ['State', d.state === 'live' ? 'live' : h('span', null, badge(d.state, 'warn'), ' the channels answer 503 while the mock is switched off')],
+    ]),
+    d.description && d.description !== it.summary ? renderMarkdown(d.description) : null));
+  const body = h('div', { class: 'stack-sm' });
+  for (const ch of channels) {
+    const how = (PATTERN_TEXT[ch.pattern] || (() => ch.pattern))(ch);
+    const det = h('details', { class: 'op', 'data-channel': ch.id },
+      h('summary', null, h('span', { class: 'path' }, ch.address),
+        h('span', { class: 'sum' }, ch.send.length + ' published, ' + ch.receive.length + ' accepted'),
+        ch.reply ? badge('request and reply', '') : null));
+    let built = false;
+    det.addEventListener('toggle', () => {
+      if (!det.open || built) return;
+      built = true;
+      const connect = ch.connect
+        ? h('div', { class: 'stack-sm', 'data-connect': ch.id },
+          snippet('WebSocket', ch.connect.websocket),
+          snippet('Server-sent events', ch.connect.sse),
+          ch.connect.publish ? snippet('Publish a message', ch.connect.publish) : null)
+        : h('p', { class: 'muted small portal-inline', style: { margin: 0 }, 'data-connect-locked': ch.id }, icon('lock'), ' Sign in for the connection snippets.');
+      det.appendChild(h('div', { class: 'op-body stack-sm' },
+        ch.description ? renderMarkdown(ch.description) : null,
+        kvgrid([
+          ['URL', h('span', { class: 'row nowrap' }, h('span', { class: 'mono break' }, ch.url), copyButton(ch.url, { icon: true, title: 'Copy the channel URL' }))],
+          ['WebSocket', h('span', { class: 'mono break' }, ch.ws_url)],
+          ['Publishes', how],
+          (ch.bindings || []).length ? ['Bindings in the document', ch.bindings.join(', ')] : null,
+        ].filter(Boolean)),
+        h('h3', { class: 'section-title' }, 'Messages it publishes'),
+        messageList(ch.send, 'This channel publishes nothing: it only accepts messages.'),
+        h('h3', { class: 'section-title' }, 'Messages it accepts'),
+        messageList(ch.receive, 'This channel accepts nothing: it only publishes.'),
+        h('p', { class: 'muted small', style: { margin: 0 } }, 'A message you publish is checked against the document: one that does not fit is answered with what is wrong.'),
+        connect));
+    });
+    body.appendChild(det);
+  }
+  el.appendChild(card('Channels', { hint: channels.length + ' channel' + (channels.length === 1 ? '' : 's') },
+    channels.length ? body : h('p', { class: 'muted small', style: { margin: 0 } }, 'The document declares no channel.')));
   return el;
 }
 
