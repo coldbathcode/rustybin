@@ -13,7 +13,9 @@ release and opens to visitors on the owner's word.
 
 ## Recently built
 
-- The follow-ups of the core next plan (unreleased, built 2026-11-12 and 2026-11-13, steps 15 to
+- [Rustybin 0.7, new features for gateway demos](changelog.md#070-2026-11-13-new-features-for-gateway-demos)
+  (2026-11-13): everything in the entries below marked 0.7.0.
+- The follow-ups of the core next plan (0.7.0, built 2026-11-12 and 2026-11-13, steps 15 to
   22): for the MCP inspector
   [client ID metadata documents](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document),
   which the control plane's own sign-in also accepts when turned on; for source control
@@ -23,33 +25,33 @@ release and opens to visitors on the owner's word.
   and for the harness [variables for an import](harness.md#importing-a-postman-collection-or-an-artillery-script),
   [a chain hop over HTTP/3](harness.md#a-hop-over-http3), a Prometheus series for chain calls and
   [an image with HTTP/3](harness.md#http3-targets).
-- [AI gateway scenarios](gateway-scenarios.md#ai-gateway-scenarios) (unreleased, built
+- [AI gateway scenarios](gateway-scenarios.md#ai-gateway-scenarios) (0.7.0, built
   2026-11-11, step 01 of the demo next plan): token limits, model fallback, semantic caching,
   prompt and response guards and load balancing, each proven against this instance's AI mock.
-- [MCP security](mcp/security.md) (unreleased, built 2026-11-11, step 02 of the demo next plan):
+- [MCP security](mcp/security.md) (0.7.0, built 2026-11-11, step 02 of the demo next plan):
   attack servers, six MCP gateway scenarios against them and three inspector checks.
-- [A mock recorded from a real API](mocks/record.md) (unreleased, built 2026-11-11, step 03 of
+- [A mock recorded from a real API](mocks/record.md) (0.7.0, built 2026-11-11, step 03 of
   the demo next plan): a recording proxy, a spec inferred from the traffic, the answers as
   examples.
-- [Contract drift](mocks/drift.md) (unreleased, built 2026-11-11, step 04 of the demo next
+- [Contract drift](mocks/drift.md) (0.7.0, built 2026-11-11, step 04 of the demo next
   plan): a mock checked against the real API it imitates, JSON or JUnit.
-- [Demo storyboards](storyboards.md) (unreleased, built 2026-11-12, step 05 of the demo next
+- [Demo storyboards](storyboards.md) (0.7.0, built 2026-11-12, step 05 of the demo next
   plan): a demo as steps with a talk track, an action and a reset, presented from the console
   and rehearsed from the command line.
-- [Customer demo packs](demo-packs.md) (unreleased, built 2026-11-12, step 06 of the demo next
+- [Customer demo packs](demo-packs.md) (0.7.0, built 2026-11-12, step 06 of the demo next
   plan): a customer's demo as one document, applied into a project of its own and torn down as
   a unit.
-- [Multi-step tests and Arazzo workflows](saved-tests.md#multi-step-tests) (unreleased, built
+- [Multi-step tests and Arazzo workflows](saved-tests.md#multi-step-tests) (0.7.0, built
   2026-11-12, step 07 of the demo next plan): a test of several steps with outputs passed on,
   imported from and exported to Arazzo 1.0, and read by the harness import.
-- [Realtime](ai/realtime.md) and [batch](ai/batch.md) AI APIs (unreleased, built 2026-11-12,
+- [Realtime](ai/realtime.md) and [batch](ai/batch.md) AI APIs (0.7.0, built 2026-11-12,
   step 08 of the demo next plan): the OpenAI-shaped realtime WebSocket protocol, and batch jobs
   in the OpenAI and Anthropic shapes on a compressed clock.
-- [Event mocks from AsyncAPI](mocks/asyncapi.md) (unreleased, built 2026-11-12, step 09 of the
+- [Event mocks from AsyncAPI](mocks/asyncapi.md) (0.7.0, built 2026-11-12, step 09 of the
   demo next plan, part A): an AsyncAPI document as a mock whose channels are served over
   WebSocket, server-sent events and webhooks, with valid messages published and what clients
   publish validated.
-- The last of the roadmap's candidates ([unreleased](changelog.md#unreleased-the-last-of-the-roadmaps-candidates),
+- The last of the roadmap's candidates ([0.7.0](changelog.md#070-2026-11-13-new-features-for-gateway-demos),
   built 2026-11-09): for source control a [diverged branch](source-control.md#a-diverged-branch)
   resolved by a person, [branches per environment](source-control.md#branches) and
   [signed commits](source-control.md#signed-commits); [a secret at an agent's request](agent-mcp.md#a-secret-at-an-agents-request)
@@ -124,11 +126,8 @@ release and opens to visitors on the owner's word.
   agents](agent-mcp.md#sign-in-with-oauth), and [self-service mocks](mocks/self-service.md)
   for the hosted demo.
 
-Planned on 2026-11-11 as a second milestone, in
-[the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md)
-(every feature step, 01 to 09, is built: the AI gateway scenarios, MCP security, recording, drift,
-demo storyboards, customer demo packs, Arazzo workflows as multi-step tests, realtime and batch
-AI APIs, and event mocks from AsyncAPI): what is left is its release.
+[The demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md)
+of 2026-11-11 is complete but for Kafka (below): its nine feature steps are in 0.7.0.
 
 ## Under consideration
 

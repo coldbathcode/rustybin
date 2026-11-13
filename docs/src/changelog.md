@@ -1,12 +1,36 @@
 # Changelog
 
-## Unreleased: the last of the roadmap's candidates
+## 0.7.0 (2026-11-13): new features for gateway demos
 
-[The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),
-steps 11 to 13, built on 2026-11-09 and not released yet, and steps 01 to 09 of
-[the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md),
-built on 2026-11-11 and 2026-11-12. Nothing to do when upgrading: what is new is off until you turn it on or
-name it in a scenario.
+Everything built since 0.6.0: steps 11 to 13 and 15 to 22 of
+[the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md)
+(the last of the roadmap's candidates and their follow-ups) and steps 01 to 09 of
+[the demo next plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/demo-next/master-plan.md)
+(AI gateway scenarios, MCP security, recording, drift, storyboards, demo packs, Arazzo workflows,
+realtime and batch AI, event mocks).
+
+**Upgrading from 0.6** (nothing to do for most instances; what is new is off until you turn it
+on or name it):
+
+- **A change of reach**: a signed-in user without `secrets.write` now gets `200` from
+  `GET /_rustybin/secret-requests` (the requests of their own agents, possibly none) and may
+  read and decline those; it was `403`. Another user's request is `404`, fulfilling is
+  unchanged, and callers who are not users see no change. A script that read the `403` as "may
+  not read requests" reads `/_rustybin/session` instead.
+- A document pulled from the repository no longer changes a `git.*` setting (a fix; a
+  repository that relied on it sets them on the instance instead).
+- Settings under `oauth.` need `settings.security`.
+- A harness scenario with `servers.chain` needs every server node on 0.7.0; runs without a chain
+  are unchanged on a mixed cluster. A chain hop with `http: h3` needs the `-http3` image on every
+  server node.
+- Verified pulls are off until `git.verify` is turned on, and turning it on trusts the head of
+  that moment: connect the repository first. Teams that squash or rebase pull requests at the
+  git host switch to merge commits, or push signed commits, before turning it on.
+- An instance whose repository is on `github.com` or `gitlab.com` with a token as its
+  authentication can open a pull request with that token once a caller asks with `open: true`;
+  nothing calls a host before that.
+- `profiles.json` may hold an `agent` object per profile; an older `rustybin` ignores it.
+- The default image has no HTTP/3; the image tagged `0.7.0-http3` has.
 
 **New**:
 
