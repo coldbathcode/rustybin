@@ -74,6 +74,27 @@ impl Drop for Gateway {
 /// An HTTP/3 server on `127.0.0.1` (an ephemeral UDP port) with the test
 /// PKI's server certificate, handing every request to `app`. With
 /// `preferred`, it asks its clients to move to that address.
+/// A stand-in gateway whose port has no TCP listener, so what reaches it
+/// came over QUIC. Another test of the suite may hold the TCP port of the
+/// same number by chance: such a gateway is passed over.
+fn gateway_without_tcp(state: &AppState, app: &Router) -> Gateway {
+    let tcp_is_free = |addr: &SocketAddr| {
+        std::net::TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_err()
+    };
+    let mut gw = gateway(state, app.clone(), None);
+    for _ in 0..10 {
+        if tcp_is_free(&gw.addr) {
+            break;
+        }
+        gw = gateway(state, app.clone(), None);
+    }
+    assert!(
+        tcp_is_free(&gw.addr),
+        "the stand-in gateway has no TCP listener"
+    );
+    gw
+}
+
 fn gateway(state: &AppState, app: Router, preferred: Option<SocketAddrV4>) -> Gateway {
     use rustls::pki_types::pem::PemObject;
     let cert = rustls::pki_types::CertificateDer::from(
@@ -409,11 +430,7 @@ async fn http3_targets_are_verified_over_http3() {
     let (server, app, state) = running(config).await;
     // The gateway routes to this node, which serves its token: verified,
     // over QUIC (nothing listens on TCP at the gateway's port).
-    let gw = gateway(&state, app.clone(), None);
-    assert!(
-        std::net::TcpStream::connect_timeout(&gw.addr, Duration::from_millis(200)).is_err(),
-        "the stand-in gateway has no TCP listener"
-    );
+    let gw = gateway_without_tcp(&state, &app);
     let (status, run) = start(&app, scenario(gw.addr, 20, "1s")).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{run}");
     let report = wait_for_report(&app, run["run_id"].as_str().unwrap()).await;
@@ -663,11 +680,7 @@ async fn an_http3_hop_is_verified_over_http3() {
     let tcp = json!({ "url": format!("http://{}", server.http_addr) });
     // The gateway routes to this node, which serves its token: verified,
     // over QUIC (nothing listens on TCP at the gateway's port).
-    let gw = gateway(&state, app.clone(), None);
-    assert!(
-        std::net::TcpStream::connect_timeout(&gw.addr, Duration::from_millis(200)).is_err(),
-        "the stand-in gateway has no TCP listener"
-    );
+    let gw = gateway_without_tcp(&state, &app);
     let hops = json!([h3_hop(gw.addr, "/harness/back")]);
     let (status, run) = start(&app, chain_scenario(tcp.clone(), 20, "1s", hops)).await;
     assert_eq!(status, StatusCode::ACCEPTED, "{run}");
