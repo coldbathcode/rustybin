@@ -1,5 +1,61 @@
 # Changelog
 
+## Unreleased
+
+Built on 2026-11-13 after 0.7.0 and not released yet: follow-ups the 0.7.0 builds named, and four
+fixes. Nothing to do when upgrading.
+
+**New**:
+
+- Source control: [a pull request that is already open](source-control.md#opened-by-the-git-host)
+  is found and answered. When the host refuses to open one, the instance makes one read for an
+  open pull request of that branch into that base and answers its address
+  (`already_open: true`, `untrusted_pull_request`) in place of the refusal.
+- Source control: a third kind of git host, `gitea` (Gitea and Forgejo, which share an API), for
+  `git.host`. `auto` never picks it: name it, with `git.host_api` when the API is not at
+  `/api/v1` on the repository's host. Tested against a stand-in, not a real server.
+- Diagnostics: `source_control_host` (a git host named on purpose that cannot open a pull
+  request: no token, an API the outbound policy refuses, an address or a repository name that
+  cannot be used) and `client_documents` (client ID metadata documents turned on with no host
+  allowed for them).
+- MCP inspector: the client document is also served at
+  `GET /.well-known/rustybin-inspector-client.json`, and the OAuth walk now sends that address
+  as its client id, so one Rustybin can sign in to another (an outbound policy that refuses
+  `/_rustybin` paths, as Rustybin's does, can fetch it). The 0.7.0 address keeps answering.
+- Harness: [a Postman environment file as an import's variables](harness.md#importing-a-postman-collection-or-an-artillery-script):
+  `environment` in the import envelope and on the `import_scenario` tool,
+  `rustybin harness import <file> --environment FILE`, and a file field in the console's form.
+  Explicit variables win. Entries that are disabled, marked secret or named like a credential
+  are skipped, and named in `notes` without their values.
+- Dev portal: [event APIs](portal.md#event-apis). A mock made from an AsyncAPI document is
+  published as an event API with its channels, messages, examples and connection snippets.
+
+**Changed**:
+
+- Harness import: a variable named like a harness placeholder (`id`, `seq` and the rest) is
+  accepted when the caller gives its value, and `notes` says the name was given a fixed value;
+  it was refused. Without a given value nothing changes.
+- An authorization server that remembered the inspector by its 0.7.0 client id sees a new one
+  and asks for consent once more.
+- An event mock has no collection: `GET /_rustybin/mocks/{name}/collections/{format}` answers
+  `409` with `reason: asyncapi` (it answered an empty collection), and the portal's collection
+  and reference routes `404`. Closing an event API on the portal answers `409 open_channels`
+  unless the instance requires an API key, since channels ignore mocked security.
+- An event mock's own spec route (`/mock/{name}/_rustybin/openapi.json`) serves the AsyncAPI
+  document with `servers` in AsyncAPI's shape, pointing at `/events/{name}`.
+
+**Fixed**:
+
+- [Gateway scenarios](gateway-scenarios.md) no longer take one answer of the gateway's own for
+  the feature. `circuit_breaker` passed through a plain proxy that lost one upstream call and
+  answered `502` itself; it now passes only when the gateway answers three requests in a row
+  without the upstream, the last half the half-open time after the first, and reports a single
+  such answer as one failed call. `timeouts` needs the upstream to have received the request,
+  and `ai_prompt_guard` sends a refused prompt a second time. Five guard scenarios that accept a
+  refusal after the upstream was reached can still be passed by a gateway error there; the page
+  says so.
+- The CLI reference builds without an unclosed tag.
+
 ## 0.7.0 (2026-11-13): new features for gateway demos
 
 Everything built since 0.6.0: steps 11 to 13 and 15 to 22 of

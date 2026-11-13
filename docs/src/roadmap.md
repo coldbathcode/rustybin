@@ -13,6 +13,10 @@ release and opens to visitors on the owner's word.
 
 ## Recently built
 
+- Follow-ups to 0.7.0 ([unreleased](changelog.md#unreleased), built 2026-11-13): an already open
+  pull request found, Gitea and Forgejo as a git host, two diagnostics checks, the inspector's
+  client document at a second address, a Postman environment file for an import, event APIs on
+  the dev portal, and gateway scenario judgements that one failed call cannot pass.
 - [Rustybin 0.7, new features for gateway demos](changelog.md#070-2026-11-13-new-features-for-gateway-demos)
   (2026-11-13): everything in the entries below marked 0.7.0.
 - The follow-ups of the core next plan (0.7.0, built 2026-11-12 and 2026-11-13, steps 15 to
@@ -143,11 +147,10 @@ and are recommended against for now:
   WebSocket, server-sent events and webhooks. Producing to and consuming from a Kafka broker
   the operator names (part B of step 09 of the demo next plan, behind a cargo feature) waits
   for the owner's word; MQTT and AMQP only when asked.
-- **Source control**: a third kind of git host for pull requests (the lightweight self-hosted
-  family); a pull request that is already open is not detected.
-- **MCP inspector**: a second address for the inspector's client document outside the control
-  plane, so one Rustybin can take another's.
-- **Harness**: a Postman environment file read as an import's variables.
+- **Gateway scenarios**: five guard scenarios (`ai_response_guard` and four MCP ones) accept a
+  refusal after the upstream was reached, so a gateway error while reading the answer still
+  passes them.
+- **Harness**: a Postman environment value built from other variables.
 - **A platform authorization server for hosted instances**: Rustybin already
   points its OAuth metadata at an external issuer (`RUSTYBIN_CONTROL_OAUTH_ISSUER`);
   the platform side that issues control tokens to agents is not built.

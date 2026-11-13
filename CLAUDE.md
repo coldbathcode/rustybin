@@ -146,6 +146,36 @@ suites (`conformance/{ai,mcp,a2a,oauth}/run.sh`) are part of a step's checks, si
 or tool can fail them; a child process is started by a program's path (`sourcecontrol::git_program`), never
 a bare name with a changed `PATH`, which forks the whole process.
 
+## After 0.7.0: follow-ups and fixes (built 2026-11-13, not released)
+
+The owner asked for everything the 0.7.0 builds had named and left; the changelog's "Unreleased" section
+lists it, and the step files of steps 15, 18 and 20 each have a "Follow-ups (built after 0.7.0)" section.
+Rules they left:
+
+- Gateway scenarios: a scenario that passes on an answer the gateway made on its own needs what a failed
+  call cannot produce: the answer repeated (`BREAKER_CONFIRMATIONS`), the feature's own status, or proof the
+  upstream received the request (`Scenarios::note_arrival`).
+- Tests: name resolution goes through `egress::lookup` only; under `cfg(test)` it resolves `localhost` and
+  address literals, so a unit test never reaches a public host.
+- Dev portal: a portal item's kind comes from `portal::items::kind_of`, not `ItemId::kind()`; an event
+  mock's detail is `event_detail`, with no credential and no `connect` when locked, and an event mock has no
+  collection (`409 asyncapi`).
+- Event mocks: `handlers::served_spec` answers an AsyncAPI document with `servers` in that version's own
+  shape (`event_servers`) and nothing of the OpenAPI rewrites.
+- MCP inspector: `clientdoc::client_id` is the one place that says which address the walk sends (the
+  `/.well-known/rustybin-inspector-client.json` one, in `control_oauth::is_discovery_path` so it needs no
+  key); both addresses come from `clientdoc::document_at` and each names itself. `Egress::permits_any`
+  answers whether a purpose permits anything, from the same reading (`Egress::scope`) as every decision.
+- Source control: every call to a git host goes through `call_host` (`Purpose::GitHost`, pinned, no
+  redirect, bounded); after a refused opening call the one read `existing_at_host` decides whether a pull
+  request is already open, by the read's answer and never by the refusal's words; a kind without one public
+  host answers `Host::public()` with `None`, so `auto` never picks it (`gitea`).
+- Harness import: a placeholder name (`scenario::PLACEHOLDERS`) is accepted only as a value the caller
+  gives, with a note (`import::fixed_placeholders`); a Postman environment's entries go through
+  `check_variable` like a typed variable, and an entry that is secret or named like a credential is skipped
+  and named, never refused and never taken (this corrects the step 18 paragraph below, which says a
+  placeholder name is refused).
+
 ## Core next steps 15 to 22 (built 2026-11-12 and 2026-11-13, released in 0.7.0)
 
 The owner chose "all buildable, then release" on 2026-11-12: every step that could be built, each
