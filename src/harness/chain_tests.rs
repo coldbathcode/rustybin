@@ -643,8 +643,18 @@ async fn the_kill_switch_stops_onward_calls() {
     assert_eq!(stopped_by(&before), 0, "{before:?}");
     let (status, v) = send(&app, Method::POST, "/_rustybin/harness/stop", None).await;
     assert_eq!(status, StatusCode::OK, "{v}");
+    // A call sent just before the switch may still be on its way to the
+    // hop, or not yet counted by it: let those arrive before counting.
+    let mut hits = hop.hits();
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let now = hop.hits();
+        if now == hits {
+            break;
+        }
+        hits = now;
+    }
     // With the switch set, a request of the run calls nothing.
-    let hits = hop.hits();
     let late = signed(&key, &id, &node, 900_000, 0, "/harness/front");
     let late = [("x-rustybin-harness", late.as_str())];
     assert_eq!(knock(&app, "/harness/front", &late).await, StatusCode::OK);
