@@ -49,3 +49,29 @@ More than one replica (step 24). OAuth for visitors' agents (step 23).
 
 The demo runs the current release, and it is either open with the walk recorded here or this row
 says it stays locked by the owner's choice.
+
+## Build notes: part A (2026-11-13)
+
+The owner said "get the demo to the latest release" on 2026-11-13; part B (opening to visitors)
+was not asked for and the demo stays locked to the owner's sign-in.
+
+- `deploy/demo/compose.yaml` is pinned to the 0.7.0 digest
+  (`sha256:84663e342a16caf8a9fea08a9288cffc14673a708db6b33af3b3ed2da35f229b`, verified with cosign
+  before the deploy). Nothing else in the file changed and nothing new needed a variable.
+- On the VPS, before the change: the old compose file kept as `compose.yaml.0.6.0` and the data
+  volume archived as `data-backup-0.6.0-2026-11-13.tgz`, both in `~/rustybin-demo`. Going back is
+  the old file, the archive restored into the volume, and `docker compose up -d`.
+- After `docker compose up -d`: the container reports 0.7.0, no warning or error line in its log,
+  about 30 MiB of its 512 MiB in use.
+- The walk over the public URLs, without a credential: 256 control route calls (every method the
+  catalogue lists, path parameters filled with `x`), 243 answered `401`. The other 13 are the open
+  ones and answered as an open route should with no input: the readiness check `200`, the
+  inspector's client document `200` (new in 0.7.0, open by design, nothing secret), the single
+  sign-on status `200` and start `302`, `400` from the OAuth registration and authorization, the
+  join and the single sign-on callback, and `404` from the harness node routes and the git webhook
+  (the harness is off and no webhook secret is set).
+- A wrong password is refused (`401`); the console and the landing page load; the sample mock
+  answers on its host (`petstore.rustybin-mock.dev/v1/pets/1`) and by path.
+- Not done: the diagnostics were not read, since that needs the owner's sign-in and the password is
+  written nowhere. The owner reads Management, Diagnostics after signing in.
+

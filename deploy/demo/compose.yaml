@@ -22,7 +22,7 @@ services:
   rustybin:
     <<: *hardened
     # The signed release, pinned by digest: never `latest`.
-    image: ghcr.io/coldbathcode/rustybin@sha256:492000348f22ebb73cd6197de2a07ea6bfc9a363b606b33dcf25b535e29cceb3
+    image: ghcr.io/coldbathcode/rustybin@sha256:84663e342a16caf8a9fea08a9288cffc14673a708db6b33af3b3ed2da35f229b
     hostname: demo
     env_file: rustybin.env   # RUSTYBIN_CONSOLE_PASSWORD_HASH, RUSTYBIN_LEADS_SALT
     environment:

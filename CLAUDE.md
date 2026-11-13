@@ -84,8 +84,8 @@ section lists what is new.
 
 Steps 14 to 26 of the same plan (planned 2026-11-09, section 6: the order, a table of decisions for the owner
 with a recommendation each, one step file each) were everything left. Steps 15 to 22 are built, see "Core next
-steps 15 to 22" below; steps 23 and 24 are recommended against and not built; step 26 (the demo) is the
-owner's to start.
+steps 15 to 22" below; steps 23 and 24 are recommended against and not built; step 26's part A is done (the
+demo runs 0.7.0 since 2026-11-13, still locked) and opening it to visitors is the owner's to start.
 
 Step 11 (source control; `docs/plans/core-next/step-11-source-control.md`):
 `src/sourcecontrol/branches.rs` (a diverged branch: `divergence`, the previews, `pull_request`; the

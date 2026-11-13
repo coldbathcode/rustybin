@@ -50,7 +50,7 @@ The marker a session looks for is the first row that is not done.
 | [23](step-23-visitor-oauth.md) | OAuth sign-in for visitors and key holders | waits for the owner, section 6 |
 | [24](step-24-self-service-replicas.md) | Self-service across replicas | waits for the owner, section 6 |
 | [25](step-25-release-0-8.md) | Release 0.8.0: whichever of 15 to 24 are built | folded into 0.7.0 on 2026-11-13 (the owner chose one release of everything on `main`); no 0.8.0 is owed |
-| [26](step-26-open-the-demo.md) | The demo on the current release, and open to visitors | the owner's to start, section 6 |
+| [26](step-26-open-the-demo.md) | The demo on the current release, and open to visitors | part A done 2026-11-13 (the demo runs 0.7.0, still locked to the owner's sign-in); part B (open to visitors) is the owner's to start |
 
 Released as 0.6.0 after step 10, and as 0.7.0 on 2026-11-13 after steps 11 to 13 and 15 to 22. What is left is step 26 (the demo), the owner's to start, and steps 23 and 24, recommended against.
 
