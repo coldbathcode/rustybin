@@ -154,19 +154,99 @@ name it in a scenario.
   and the variable named; an Artillery script's phases become `pattern` when they map exactly. A
   program is refused.
 - Harness: [HTTP/3 targets](harness.md#http3-targets) (`targets[].http: h3`) in builds with the
-  cargo feature `harness-http3`. The default binary and the published image have no QUIC stack and
+  cargo feature `harness-http3`. The default binary and the default image have no QUIC stack and
   refuse the scenario with a message naming the feature. QUIC connects to the run's pinned
   addresses only.
+- [An image with HTTP/3](harness.md#http3-targets): a second published image carries the suffix
+  `-http3` on every tag (`latest-http3`, `X.Y.Z-http3`), built with `harness-http3` and signed
+  like the default one. The default image, the one a public instance runs, gains nothing.
 - Harness: [server-to-server chains](harness.md#server-to-server-chains) (`servers.chain`): a
   server answering a request of the run calls a further hop, and the report gains the leg of each
   hop (`server.chain`). A server calls on only for a request with its run's signed marker, only
   while the run is live, only to a hop the scenario names and the server node allows, pins and
   verifies, once per request and hop, to a depth of 3. A scenario with a chain needs every server
   node on this version; runs without one are unchanged on a mixed cluster.
+- Harness: [a hop of a chain over HTTP/3](harness.md#a-hop-over-http3) (`http: h3` on a hop) in
+  builds with `harness-http3`. The hop is pinned, verified over HTTP/3 and called on its pinned
+  addresses only; its QUIC connections close when the kill switch is set or the run ends. Chains
+  may mix protocols. A build without the feature refuses the hop by the feature's name.
+- Harness: `rustybin_harness_chain_calls_total{run, hop, result}` on `/_rustybin/metrics`, a
+  chain's onward calls on each server node while the run is on. `result` is `ok` (answered),
+  `failed` (no answer) or why no call was made (`not_prepared`, `not_live`, `kill_switch`,
+  `seen_before`, `untracked`, `busy`); the numbers are the report's. A run without a chain has no
+  such series.
+- Harness: [variables given to a scenario import](harness.md#importing-a-postman-collection-or-an-artillery-script).
+  A collection keeps its base URL and ids in an environment the exported file does not carry, so
+  the caller gives the values: an envelope `{document, format, variables}` on
+  `POST /_rustybin/harness/import`, `rustybin harness import <file> --var NAME=value`,
+  `variables` on the `import_scenario` tool, and a form in the console that asks for the
+  variables an import named. A given value wins over the document's own; at most 64, 1 KiB
+  each. A name that is a harness placeholder (`seq`, `id` and the rest) or looks like a
+  credential is refused, credentials are removed after the values are put in, and a value is
+  never logged or in an audit entry.
+- MCP inspector: [client ID metadata documents](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document).
+  The instance serves the inspector's client document at
+  `GET /_rustybin/oauth/inspector-client.json` (open; `rustybin mcp client-document`), and the
+  OAuth walk sends its URL as the client id, with no registration call, to an authorization
+  server that supports it. Step 4 of the walk says which client was used and why not the others
+  (an instance on `http://localhost` cannot offer a document and registers). **Client** in the
+  auth form forces a document, registration or a given id, and a saved connection keeps the
+  choice. A new check, `client_document`, says whether a server takes this instance's document.
+- [OAuth sign-in to `/_rustybin/mcp` with a client ID metadata document](agent-mcp.md#sign-in-with-oauth),
+  off by default. With the setting `oauth.client_metadata_documents` on, an agent's client may
+  name itself with the URL of a document instead of registering. The instance fetches it under
+  the new outbound purpose `client_metadata`, which has no default (only hosts in
+  `RUSTYBIN_EGRESS_ALLOW`): no redirects, at most 5 KiB, kept five minutes. The consent page
+  shows the document's host and says the name is the client's own claim. A document from git
+  never changes the setting.
+- [A note on a declined secret request](agent-mcp.md#a-secret-at-an-agents-request): the decline
+  takes an optional `note` (at most 300 characters; `rustybin settings decline <id> --note`, a
+  field in the console) that the agent reads in `get_secret_request`. Never the secret; a note
+  is in no audit entry. The console's gear shows how many requests wait, from any view.
+- [Verified pulls](source-control.md#verified-pulls): with `git.verify` on (off by default) the
+  instance takes the repository's side only when an allowed signer signed every commit since the
+  last verified head (SSH signatures; git 2.38 or later). `git.allowed_signers` names who may
+  sign; the instance's own signing key is allowed without being listed. A merge commit passes
+  unsigned only as the clean merge of two verified parents, so a host's merge button works; a
+  squash or rebase merge made by the host is refused. It holds on every path that applies the
+  repository: a pull, the webhook, the automatic mode, startup, `resolve` with `repository`, a
+  switch of branch and a checkpoint from the repository. A refusal is `409` with
+  `reason: unverified`, the commit and why; nothing is applied. Turning it on trusts the head of
+  that moment. `rustybin git signers`, a "Verified pulls" card in the console, and a diagnostics
+  check.
+- [A pull request opened by the git host](source-control.md#opened-by-the-git-host): `resolve`
+  with `pull_request` takes `open: true`, and after the push the git host's API is asked to open
+  the pull request; the answer carries its address (`untrusted_pull_request`). GitHub and GitLab
+  and their self-hosted variants: the settings `git.host` (`auto` recognises `github.com` and
+  `gitlab.com` only), `git.host_api` and the secret `git.host_token` (else `git.token`, on the
+  remote's own host only). The instance never merges one. When the host does not open it the
+  branch stays pushed and `not_opened` says why; `dry_run` calls nothing. The outbound purpose
+  `git_host` permits exactly the host's API. In the console, `git_resolve` with `open`, and
+  `rustybin git resolve --with pull-request --open`. The two hosts' APIs were tested against
+  stand-ins, not the real hosts.
 
 **Changed**:
 
-- The management MCP server has 163 tools for an admin (`request_secret`, `get_secret_request`,
+- **A change of reach**: [a user reads and may decline the secret requests of their own
+  agents](agent-mcp.md#your-own-agents-requests) without `secrets.write`
+  (`GET /_rustybin/secret-requests`, `GET /_rustybin/secret-requests/{id}`,
+  `POST /_rustybin/secret-requests/{id}/decline`). Another user's request is `404`, and `pending`
+  counts the requests the caller may read. Fulfilling is unchanged, and a caller who is not a
+  user still needs `secrets.write` for all of it.
+- Settings under `oauth.` need `settings.security`, and `update_settings` asks to confirm a
+  change of one.
+- `GET /_rustybin/git` answers `verification` and `host`, the `check_egress` tool's `purpose`
+  takes every purpose, and `GET /_rustybin/harness` answers `http3` with
+  the harness off too.
+- A scenario import names every variable a left-out request needs in `variables`, not only the
+  first, and a `400` for want of variables carries the list. A Postman collection's variable in
+  the place of a URL's host that has a value is read as a base URL (its host is in `hosts`, its
+  path leads the requests). The harness import of an Arazzo document no longer leaves a step out
+  for a reference inside a secret-looking header: the header is removed by name.
+
+- The management MCP server has 169 tools for an admin (the six event mock tools `list_channels`,
+  `list_channel_messages`, `publish_event`, `list_event_subscribers`, `add_event_subscriber`,
+  `remove_event_subscriber`, and `request_secret`, `get_secret_request`,
   `git_branches`, `git_switch_branch`, `git_signing_key`, `import_scenario`, the six recording
   tools `list_recordings`, `start_recording`, `get_recording`, `stop_recording`,
   `build_mock_from_recording`, `delete_recording`, `check_mock_drift`, `list_drift_runs`, and

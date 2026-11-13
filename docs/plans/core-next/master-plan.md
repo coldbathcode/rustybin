@@ -39,14 +39,14 @@ The marker a session looks for is the first row that is not done.
 | [12](step-12-agent-secrets-and-sign-in.md) | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | done 2026-11-09 |
 | [13](step-13-harness-follow-ups.md) | Harness: scenario import, HTTP/3 targets, server-to-server chains | done 2026-11-09 |
 | [14](step-14-release-0-7.md) | Release 0.7.0: steps 11 to 13 pushed, tagged, the signed image and its digest | the owner's to start, section 6 |
-| [15](step-15-client-id-metadata-documents.md) | MCP inspector: client ID metadata documents (and whether the control plane accepts one) | planned 2026-11-09; part B: owner decision, section 6 |
-| [16](step-16-chain-metrics.md) | Harness: a Prometheus series for chain calls | planned 2026-11-09 |
-| [17](step-17-secret-request-follow-ups.md) | Secret requests: a count outside Management, a note on a decline, a user sees their own agents' requests | planned 2026-11-09 |
-| [18](step-18-import-variables.md) | Harness: variables given to a scenario import | planned 2026-11-09 |
-| [19](step-19-verified-pulls.md) | Source control: pulled commits verified against allowed signers | planned 2026-11-09: owner decision, section 6 |
-| [20](step-20-pull-request-api.md) | Source control: a pull request opened through the git host | planned 2026-11-09: owner decision, section 6 |
-| [21](step-21-chain-over-http3.md) | Harness: a chain hop over HTTP/3 | planned 2026-11-09 |
-| [22](step-22-http3-image.md) | An image with HTTP/3 | planned 2026-11-09: owner decision, section 6 |
+| [15](step-15-client-id-metadata-documents.md) | MCP inspector: client ID metadata documents (and whether the control plane accepts one) | done 2026-11-12 (parts A and B; part B off by default, the recommendation) |
+| [16](step-16-chain-metrics.md) | Harness: a Prometheus series for chain calls | done 2026-11-12 |
+| [17](step-17-secret-request-follow-ups.md) | Secret requests: a count outside Management, a note on a decline, a user sees their own agents' requests | done 2026-11-12 |
+| [18](step-18-import-variables.md) | Harness: variables given to a scenario import | done 2026-11-12 |
+| [19](step-19-verified-pulls.md) | Source control: pulled commits verified against allowed signers | done 2026-11-12 (SSH signatures only, the recommendation) |
+| [20](step-20-pull-request-api.md) | Source control: a pull request opened through the git host | done 2026-11-13 (the two largest hosts and their self-hosted variants, the recommendation) |
+| [21](step-21-chain-over-http3.md) | Harness: a chain hop over HTTP/3 | done 2026-11-12 |
+| [22](step-22-http3-image.md) | An image with HTTP/3 | done 2026-11-12 (a second image with the suffix `-http3`, the recommendation) |
 | [23](step-23-visitor-oauth.md) | OAuth sign-in for visitors and key holders | waits for the owner, section 6 |
 | [24](step-24-self-service-replicas.md) | Self-service across replicas | waits for the owner, section 6 |
 | [25](step-25-release-0-8.md) | Release 0.8.0: whichever of 15 to 24 are built | the owner's to start, section 6 |
@@ -166,6 +166,13 @@ has chains over it. Steps 19 and 20 both change `src/sourcecontrol/` and go one 
 | 24 | More than one replica for visitors? | Not until one instance is measurably full; if built, a compose spike first and PostgreSQL behind a cargo feature |
 | 25 | Release 0.8.0 when the built steps are in? | Yes, one release for the group |
 | 26 | Move the demo to the current release, and open it to visitors? Email leads on or off? | Move it after step 14; opening and its date are the owner's alone |
+
+On 2026-11-12 the owner, asked what the next release should hold, chose "all buildable, then
+release": steps 15 to 22 built, taking the recommendation of each row above (15 B, 19, 20, 22),
+then one release of everything on `main`. Steps 23 and 24 stay as recommended (not now), and Kafka
+for event mocks (demo next step 09, part B) was left out by the same answer. Steps 15 to 21 were
+built by one agent each in its own worktree and merged with the full checks run on the merge, as
+steps 11 to 13 were; step 22 was built in the coordinating session.
 
 A row answered no closes its step: the row of section 3 says so with the date, and the roadmap keeps
 the line under consideration with the reason.

@@ -83,10 +83,9 @@ The owner said "build it all out" on 2026-11-09; section 5 of
 section lists what is new. A release waits for the owner's word.
 
 Steps 14 to 26 of the same plan (planned 2026-11-09, section 6: the order, a table of decisions for the owner
-with a recommendation each, one step file each) are everything left: the 0.7.0 release of steps 11 to 13, the
-follow-ups the build notes named, the roadmap's remaining candidates, a 0.8.0 release and the demo. None is
-built; the marker is the first row of section 3 that is not done, and steps 14, 25 and 26 are the owner's to
-start.
+with a recommendation each, one step file each) were everything left. Steps 15 to 22 are built, see "Core next
+steps 15 to 22" below; steps 23 and 24 are recommended against and not built; step 26 (the demo) is the
+owner's to start.
 
 Step 11 (source control; `docs/plans/core-next/step-11-source-control.md`):
 `src/sourcecontrol/branches.rs` (a diverged branch: `divergence`, the previews, `pull_request`; the
@@ -136,6 +135,93 @@ and only through `safety::ChainGate` (live, the kill switch, once per request an
 hops `safety::pin_chain` pinned; a field added to the marker goes inside its signature and leaves
 a client's marker byte for byte what it was; an onward call is never counted with the clients'
 arrivals.
+
+## Core next steps 15 to 22 (built 2026-11-12 and 2026-11-13)
+
+The owner chose "all buildable, then release" on 2026-11-12: every step that could be built, each
+decision of section 6 taking its recommendation. Each step file has build notes and its "For the merge"
+text.
+
+Step 15 (client ID metadata documents; `docs/plans/core-next/step-15-client-id-metadata-documents.md`,
+user docs `docs/src/mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document` and
+`docs/src/agent-mcp.md#sign-in-with-oauth`): the inspector's document (`src/mcp/inspector/clientdoc.rs`,
+`GET /_rustybin/oauth/inspector-client.json`, open; the walk's `chooseClient` in `ui/lib/mcpauth.js`; the
+`client_document` check) and the control plane accepting one (`src/control_oauth/client_docs.rs`, the
+setting `oauth.client_metadata_documents`, off by default, `Purpose::ClientMetadata` with no default).
+Rules it left: the redirect URI the walk sends is the document's, byte for byte, and the walk uses a
+document only when `clientdoc::unusable_reason` is `None` (https, not loopback) unless a person forced it;
+a saved connection keeps the way (`auth.oauth.client`), never a token it was not given; a check that needs
+no connection is skipped by name in the "not connected" loop of `checks::run` and run after it; the control
+plane fetches a client's document only with the setting on, through `client_docs::client` (the URL rules
+first: https, or http to a loopback host, which the outbound policy still refuses unless loopback is
+allowed; the outbound policy before any call, no redirect, 5 KiB, the `client_id` equal to the URL, a
+bounded cache), and counts the sign-in request before it calls out; what a document says is the client's
+claim (the consent API's `client_document`, shown as text with its host); a setting under `oauth.` is a
+security setting (`settings::SECURITY_PREFIXES`, `SENSITIVE_PREFIXES`,
+`configdoc::REPOSITORY_REFUSED_PREFIXES`); the mock authorization server of `/mcp/protected` never fetches
+a client's URL.
+
+Steps 16 and 21 (harness chains; `step-16-chain-metrics.md`, `step-21-chain-over-http3.md`): a chain's
+Prometheus series (`rustybin_harness_chain_calls_total`) is fed only by what `chain::ChainStats` counts
+(`refuse` and `record` answer the `result`, `call_on` passes it to `Metrics::harness_chain_call`), so the
+series and the report cannot drift; its labels are a fixed table (`metrics::HARNESS_CHAIN_RESULTS`,
+`MAX_HARNESS_CHAIN_HOPS`), a new `ChainRefusal` goes in both, and an onward call's arrival is in no series.
+An `h3` hop (only with `harness-http3`) is called by the `H3Client` of the hop's `PinnedTarget` and by
+nothing else, counted through `chain::call_on` like every onward call; what holds QUIC connections outside
+a run's targets closes them itself (`Chain::close_connections` from `RunEntry::chain_not_live`,
+`Chain::shut` from `RunEntry::finish`, `chain::close_quic_on_kill` while the kill switch is set), and a
+call ended by such a close is counted as stopped, not failed.
+
+Step 17 (secret requests; `step-17-secret-request-follow-ups.md`): every reader of secret requests on the
+control API goes through `secret_requests::visible_to` and `sees` (everyone's with `secrets.write`, a
+user's own agents' without, another's is `404`); owning the agent lets a user read and decline, never
+fulfil (the fulfil route keeps declaring `secrets.write`); a note on a decline is a person's text
+(`clean_note`, answered as `note`, not `untrusted_*`), never in an audit entry or a log line, and never a
+place for the secret; the gear's count comes from the requests route's `pending`
+(`ui/lib/secretrequests.js`: `pollCount`), never from `/_rustybin/status`, and is not asked while the tab
+is hidden.
+
+Step 18 (import variables; `step-18-import-variables.md`): values for a document's variables given with a
+harness import (`import::Variables`, the envelope read by `import::import_body`, `--var`, `variables` of
+`import_scenario`, the form in `ui/views/harness.js`). Rules it left: a given value goes in only where the
+document's own would (`Vars::value`), so credentials are removed after it by the same code and the result
+still passes `import::fits`; a variable is refused by name when it is a harness placeholder
+(`scenario::PLACEHOLDERS`) or looks like a credential, and a value never holds `{{`; a value is never in an
+error, a note, `left_out`, a log line or an audit entry (`Variables`' `Debug` shows names only); a refusal
+that names missing variables carries them as `variables` (`import::Refusal`); an Arazzo step's output is
+never given.
+
+Step 19 (verified pulls; `step-19-verified-pulls.md`, `src/sourcecontrol/verify.rs`, user docs
+`docs/src/source-control.md#verified-pulls`): every path that takes the repository's side (moves the
+working copy to it, applies its document, reads its checkpoints) calls `SourceControl::verify_rev` before
+anything moves, a dry run included, and a new such path does too; an operation that moves the head without
+verifying (`resolve` with `instance`, a commit) calls `verify_sync` first, so a head is trusted only as it
+was when `git.verify` was turned on; the instance's own commit is a verified head only on a verified head
+(`own_commit`); a refusal names the commit's id and a reason in the instance's words, never the commit's
+author or subject; signatures are SSH only (the OpenPGP and X.509 programs are never run) and a signer line
+never carries an option; the verified heads live in `<state>/repo.verified.json`, in no document, and a
+document from the repository never changes `git.verify` or `git.allowed_signers`.
+
+Step 20 (a pull request through the git host; `step-20-pull-request-api.md`, `src/sourcecontrol/host.rs`,
+`host/github.rs`, `host/gitlab.rs`, the fakes in `fake_host.rs`, user docs
+`docs/src/source-control.md#opened-by-the-git-host`): a git host is asked for one thing, to open a pull
+request, never to merge, review or comment; a new kind is a module behind `host::Host` (where the API is,
+the repository's name, the call, the reading of the answer) and never makes a call itself:
+`SourceControl::open_at_host` does, once, under `Purpose::GitHost`, whose rule is exactly the API's host
+(`sync_host_egress`); `auto` recognises a public host by its exact name and is `none` for anything else;
+the token is `git.host_token`, and `git.token` goes only to the remote's own host; what the host answers is
+`untrusted_pull_request` and `untrusted_host_message` (cleaned, cut, scrubbed of the token, never in
+`detail`, a log line or an audit entry); what is sent is the instance's own text (`pull_request_text`: no
+name only the repository has, no value of either side); what the settings cannot serve is refused before
+the push, a host that does not open it leaves the branch pushed and is a `200`; the call is never retried.
+The two hosts' APIs were tested against in-process fakes only.
+
+Step 22 (an image with HTTP/3; `step-22-http3-image.md`): `.github/workflows/docker-publish.yml` builds two
+variants in parallel jobs, the default (`quota-postgres`) and one whose every tag carries the suffix
+`-http3` (`quota-postgres harness-http3`), each signed by digest with its own `signed ...` line; a release
+records and verifies both digests. The default image, which a public instance runs, never gains a QUIC
+stack. `GET /_rustybin/harness` answers `http3` with the harness off too (the smoke test tells the
+variants apart by it).
 
 ## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 09 built, not released)
 

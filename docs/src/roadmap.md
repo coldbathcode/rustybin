@@ -5,17 +5,24 @@ the pages for the features that exist today describe current behaviour.
 
 ## Next
 
-Planned on 2026-11-09 and waiting for a go, in
+Nothing is being built. What is left of
 [the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md)
-(steps 14 to 26): a release of what is built and not released yet; then client ID metadata
-documents for the MCP inspector, a Prometheus series for chain calls, three additions to secret
-requests, variables for a scenario import and a chain hop over HTTP/3; then, each after a
-decision, verified pulls, a pull request through the git host and an image with HTTP/3. The two
-largest candidates below (OAuth for visitors, self-service across replicas) are planned too and
-recommended against for now.
+waits for a decision: the two largest candidates below (OAuth for visitors, self-service across
+replicas) are planned and recommended against for now, and the hosted demo moves to the current
+release and opens to visitors on the owner's word.
 
 ## Recently built
 
+- The follow-ups of the core next plan (unreleased, built 2026-11-12 and 2026-11-13, steps 15 to
+  22): for the MCP inspector
+  [client ID metadata documents](mcp/inspector.md#the-inspector-as-a-client-with-a-metadata-document),
+  which the control plane's own sign-in also accepts when turned on; for source control
+  [verified pulls](source-control.md#verified-pulls) and
+  [a pull request opened by the git host](source-control.md#opened-by-the-git-host); for agents'
+  secret requests [a note on a decline, a count on the gear and a user's own agents' requests](agent-mcp.md#a-secret-at-an-agents-request);
+  and for the harness [variables for an import](harness.md#importing-a-postman-collection-or-an-artillery-script),
+  [a chain hop over HTTP/3](harness.md#a-hop-over-http3), a Prometheus series for chain calls and
+  [an image with HTTP/3](harness.md#http3-targets).
 - [AI gateway scenarios](gateway-scenarios.md#ai-gateway-scenarios) (unreleased, built
   2026-11-11, step 01 of the demo next plan): token limits, model fallback, semantic caching,
   prompt and response guards and load balancing, each proven against this instance's AI mock.
@@ -125,16 +132,11 @@ AI APIs, and event mocks from AsyncAPI): what is left is its release.
 
 ## Under consideration
 
-From the build notes of the earlier steps and the harness plan, in no order; each has a step in
-the plan named under "Next", except event mocks over Kafka and the platform authorization
-server:
+From the build notes of the earlier steps, in no order. The first two have a step in
+[the plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md)
+and are recommended against for now:
 
-- **MCP inspector**: client ID metadata documents.
-- **Source control**: verifying the signatures of pulled commits against allowed
-  signers; a pull request opened through the git host's API.
 - **Agents**: OAuth sign-in for self-service visitors and shared-mode key holders.
-- **Harness follow-ups**: variables given to an import by the caller; a chain over
-  HTTP/3; a Prometheus series for chain calls; an image that includes `harness-http3`.
 - **Self-service across replicas**: visits and visitor mocks live in memory on one
   instance today. A shared store would let a hosted demo run several replicas
   without routing each mock to one of them.
@@ -142,6 +144,11 @@ server:
   WebSocket, server-sent events and webhooks. Producing to and consuming from a Kafka broker
   the operator names (part B of step 09 of the demo next plan, behind a cargo feature) waits
   for the owner's word; MQTT and AMQP only when asked.
+- **Source control**: a third kind of git host for pull requests (the lightweight self-hosted
+  family); a pull request that is already open is not detected.
+- **MCP inspector**: a second address for the inspector's client document outside the control
+  plane, so one Rustybin can take another's.
+- **Harness**: a Postman environment file read as an import's variables.
 - **A platform authorization server for hosted instances**: Rustybin already
   points its OAuth metadata at an external issuer (`RUSTYBIN_CONTROL_OAUTH_ISSUER`);
   the platform side that issues control tokens to agents is not built.
