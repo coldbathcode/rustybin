@@ -1118,7 +1118,7 @@ impl SourceControl {
 
     /// The git command line and environment every call uses.
     fn command(&self, env: &GitEnv, cwd: &Path, args: &[&str]) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new("git");
+        let mut cmd = tokio::process::Command::new(git_program());
         for c in &env.config {
             cmd.arg("-c").arg(c);
         }
@@ -2579,4 +2579,25 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// The git binary, found once on this process's `PATH` (else the bare
+/// name). A command with a cleared environment that sets `PATH` and names
+/// its program without a path is started by `fork`, which copies the whole
+/// process's page tables and holds the allocator's locks; a program given
+/// by path is started by `posix_spawn`. Git runs many times per operation,
+/// so this is the difference between milliseconds and tenths of a second
+/// each on a large instance.
+fn git_program() -> &'static Path {
+    static GIT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        std::env::var_os("PATH")
+            .and_then(|path| {
+                std::env::split_paths(&path)
+                    .filter(|dir| dir.is_absolute())
+                    .map(|dir| dir.join("git"))
+                    .find(|candidate| candidate.is_file())
+            })
+            .unwrap_or_else(|| PathBuf::from("git"))
+    })
 }
