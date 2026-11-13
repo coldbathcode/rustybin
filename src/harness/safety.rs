@@ -450,12 +450,12 @@ pub fn check_node_url(url: &str) -> Result<(String, u16), String> {
 /// Resolve a node's host name, refusing it when any address is a forbidden
 /// one (link-local, cloud metadata, unspecified, multicast, broadcast).
 async fn resolve_node(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
-    let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, port)))
+    let resolved = tokio::time::timeout(RESOLVE_TIMEOUT, crate::egress::lookup(host, port))
         .await
         .map_err(|_| format!("resolving {host} timed out"))?
         .map_err(|e| format!("cannot resolve {host}: {e}"))?;
     let mut addrs = Vec::new();
-    for addr in resolved.take(MAX_PINNED_ADDRS) {
+    for addr in resolved.into_iter().take(MAX_PINNED_ADDRS) {
         if let Some(why) = forbidden_address(addr.ip()) {
             return Err(format!(
                 "{host} resolves to {} ({why}): never a cluster node",
