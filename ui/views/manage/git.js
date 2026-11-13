@@ -49,12 +49,12 @@ function refusalText(r) {
 // The pull request a git host opened (untrusted_pull_request: the host's
 // own answer). Its address is a link only when it is a plain web address;
 // it is shown as text either way.
-function pullRequestBlock(pr) {
+function pullRequestBlock(pr, alreadyOpen) {
   const url = typeof pr.url === 'string' && /^https?:\/\//i.test(pr.url) ? pr.url : null;
   return h('div', { class: 'small', id: 'git-pull-request' },
     h('strong', null, 'Pull request' + (Number.isInteger(pr.number) ? ' ' + pr.number : '') + (url ? ': ' : '')),
     url ? h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', class: 'mono' }, url) : null,
-    h('span', { class: 'muted' }, ' (as the git host answered it)'));
+    h('span', { class: 'muted' }, alreadyOpen ? ' (already open at the git host, none was opened; as the host answered it)' : ' (as the git host answered it)'));
 }
 
 function lines(list, id) {
@@ -230,7 +230,7 @@ export function gitPanel(doc, reload, error) {
       // same, so the answer is a warning, with the host's own words apart.
       const notOpened = j.opened === false && j.not_opened;
       replace(result, notice(notOpened ? 'warn' : 'ok', j.detail || label + ' done'),
-        j.untrusted_pull_request ? pullRequestBlock(j.untrusted_pull_request) : null,
+        j.untrusted_pull_request ? pullRequestBlock(j.untrusted_pull_request, j.already_open === true) : null,
         notOpened && j.not_opened.untrusted_host_message ? h('div', { class: 'small', id: 'git-not-opened' }, h('strong', null, 'The git host said: '), j.not_opened.untrusted_host_message) : null,
         j.would_open ? h('div', { class: 'small', id: 'git-would-open' }, h('strong', null, 'Would open: '), j.would_open.title, h('span', { class: 'muted' }, ' at ' + j.would_open.host.api + ' (' + j.would_open.host.kind + ', ' + j.would_open.host.repository + '), from ' + j.would_open.head + ' into ' + j.would_open.base)) : null,
         (j.commits || []).length ? lines(j.commits, 'git-result-commits') : null,

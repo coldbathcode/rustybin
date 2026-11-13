@@ -35,11 +35,18 @@ rustybin doctor --profile prod
 | `source_control_diverged` | (only when it has) the branch has commits here and on the remote: the instance never merges and the automatic mode does not resolve it, so a person [chooses a way out](source-control.md#a-diverged-branch) |
 | `source_control_signing` | (only with `git.sign` on) [commit signing](source-control.md#signed-commits) can work: a usable signing key, a git that signs with SSH keys |
 | `source_control_verification` | (only with `git.verify` on) [verified pulls](source-control.md#verified-pulls) can pass something (an allowed signer or a signing key, git 2.38 or later) and the repository's side was not refused: a warning names the commit no allowed signer signed, and nothing of it was applied |
+| `source_control_host` | (only when `git.host` resolves to a git host) a pull request [can be opened there](source-control.md#opened-by-the-git-host). A warning says what is missing: no token for the API (`git.host_token`), an API the outbound policy refuses, an API address that fails its rules, or a repository whose name the kind cannot read. With `git.host` on `auto`, a repository on a public host and no token it is `ok` and says that pull requests are opened by hand. Not there without a repository or with `git.host` on `none` |
 | `default_password` | the console still accepts the default password |
 | `users` | (password mode) where the users live: `<state>/users.json`, in memory without a state directory (`warn`), or a file that could not be read or written (`fail`; an unreadable file is never written over) |
 | `client_documents` | (only with `oauth.client_metadata_documents` on) the outbound policy permits a host for the purpose `client_metadata`; with none named in `egress.allow` every client's [document](agent-mcp.md#sign-in-with-oauth) is refused before any call (`warn`) |
 | `harness` | load test mode with an engine problem |
 | `assist` | AI assist configured but not usable |
+
+A git host that is named and has no token, as the check answers it:
+
+```bash
+{{#include ../examples/config/source-control.sh:host_diagnostics}}
+```
 
 The route needs `settings.read` (the `viewer` role and the `console` scope have it); a
 token without it, an `inspector` one say, gets `403` naming the permission:

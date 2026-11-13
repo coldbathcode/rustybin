@@ -262,6 +262,22 @@ for _ in $(seq 1 100); do curl -fs -o /dev/null "$H/" && break; sleep 0.1; done
 curl -s -o /dev/null -X POST "$H/_rustybin/mocks" -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"name":"githost","spec":{"openapi":"3.0.3","info":{"title":"A git host, for the example","version":"1"},"paths":{"/api/v3/repos/{owner}/{repo}/pulls":{"post":{"operationId":"openPullRequest","parameters":[{"name":"owner","in":"path","required":true,"schema":{"type":"string"}},{"name":"repo","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"201":{"description":"opened","content":{"application/json":{"example":{"number":7,"html_url":"https://git.example.com/acme/config/pull/7"}}}}}}}}}}'
 HOST_API="$H/mock/githost/api/v3"
+# A second stand-in, for a host that has the pull request open already: it
+# refuses the opening call and lists the open one.
+curl -s -o /dev/null -X POST "$H/_rustybin/mocks" -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"name":"githost-open","spec":{"openapi":"3.0.3","info":{"title":"A git host with the pull request open, for the example","version":"1"},"paths":{"/api/v3/repos/{owner}/{repo}/pulls":{"parameters":[{"name":"owner","in":"path","required":true,"schema":{"type":"string"}},{"name":"repo","in":"path","required":true,"schema":{"type":"string"}}],"post":{"operationId":"openPullRequest","responses":{"422":{"description":"one is open already","content":{"application/json":{"example":{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for acme:review/payments-2."}],"status":"422"}}}}}},"get":{"operationId":"listPullRequests","responses":{"200":{"description":"the open ones","content":{"application/json":{"example":[{"number":7,"state":"open","html_url":"https://git.example.com/acme/config/pull/7","head":{"ref":"review/payments-2"},"base":{"ref":"main"}}]}}}}}}}},"operations":{"openPullRequest":{"respond":{"status":422}}}}'
+expect "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" -d '{}' "$H/mock/githost-open/api/v3/repos/acme/config/pulls")" '422'
+out=$(
+# ANCHOR: host_diagnostics
+# A host is named and no token is set for its API: the diagnostics say so
+# before anyone asks for a pull request.
+curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d "{\"values\": {\"git.host\": \"github\", \"git.host_api\": \"$HOST_API\"}}" "$A/_rustybin/settings"
+curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/diagnostics"
+# ANCHOR_END: host_diagnostics
+)
+expect "$out" '"id":"source_control_host","status":"warn"'
+expect "$out" 'no token for the git host'
 # ANCHOR: host_settings
 # Which host, where its API is (only for a self-hosted one: github.com and
 # gitlab.com are recognised from the repository's address), and a token
@@ -274,6 +290,7 @@ curl -s -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application
 out=$(curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git")
 expect "$out" '"host":{"setting":"github","kind":"github"'
 expect "$out" '"token_from":"git.host_token","ready":true'
+expect "$(curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/diagnostics")" '"id":"source_control_host","status":"ok"'
 out=$(
 # ANCHOR: pull_request_open_preview
 # What would be opened and where. Nothing is pushed and the host is not called.
@@ -299,6 +316,22 @@ case "$out" in *"$HOST_TOKEN"*) echo "the token is in the answer" >&2; exit 1 ;;
 # The stand-in saw one call, with the two branches and the token as a bearer.
 seen=$(curl -s -H "Authorization: Bearer $ADMIN" "$H/_rustybin/mocks/githost/requests")
 expect "$seen" 'review/payments-2'
+# The host that has it open already (the second stand-in).
+curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d "{\"values\": {\"git.host_api\": \"$H/mock/githost-open/api/v3\"}}" "$A/_rustybin/settings"
+out=$(
+# ANCHOR: pull_request_already_open
+# The same call again: the host refuses a second pull request for the two
+# branches, the instance asks which one is open, and answers that one.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"with": "pull_request", "branch": "review/payments-2", "open": true}' "$A/_rustybin/git/resolve"
+# ANCHOR_END: pull_request_already_open
+)
+echo "$out"
+expect "$out" '"opened":false,"already_open":true'
+expect "$out" '"untrusted_pull_request":{"number":7,"url":"https://git.example.com/acme/config/pull/7"}'
+case "$out" in *not_opened*) echo "an open pull request was answered as a refusal" >&2; exit 1 ;; esac
+case "$out" in *"$HOST_TOKEN"*) echo "the token is in the answer" >&2; exit 1 ;; esac
 # A host that cannot be asked (none) is said before anything is pushed.
 curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
   -d '{"values": {"git.host": "none"}}' "$A/_rustybin/settings"

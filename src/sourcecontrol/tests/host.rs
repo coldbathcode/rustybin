@@ -13,14 +13,30 @@ use crate::egress::Purpose;
 use crate::sourcecontrol::fake_host::{Fake, ECHO, READER, WRITER};
 use crate::sourcecontrol::host::{self, Kind, Setup, Target};
 
-const KINDS: [&str; 2] = ["github", "gitlab"];
+const KINDS: [&str; 3] = ["github", "gitlab", "gitea"];
 
 /// The repository as the fake of `kind` is asked for it.
 fn repository(kind: &str) -> &'static str {
     match kind {
-        "github" => "acme/remote",
-        _ => "acme%2Fremote",
+        "gitlab" => "acme%2Fremote",
+        _ => "acme/remote",
     }
+}
+
+/// The address of pull request `number` as the fake of `kind` answers it.
+fn address(kind: &str, number: u64) -> String {
+    match kind {
+        "github" => format!("https://github.example/acme/remote/pull/{number}"),
+        "gitlab" => format!("https://gitlab.example/acme/remote/-/merge_requests/{number}"),
+        _ => format!("https://gitea.example/acme/remote/pulls/{number}"),
+    }
+}
+
+fn check_of(state: &AppState, id: &str) -> Option<Value> {
+    crate::diagnostics::report(state)["checks"]
+        .as_array()
+        .and_then(|a| a.iter().find(|c| c["id"] == id))
+        .cloned()
 }
 
 fn set(state: &AppState, values: &[(&str, Value)], secrets: &[(&str, Option<&str>)]) {
@@ -130,6 +146,10 @@ fn auto_recognises_the_public_hosts_and_nothing_else() {
     // Anything else is none under auto, whatever its name looks like.
     for remote in [
         "https://git.example.com/acme/config.git",
+        // The third kind has no public host: it is always named.
+        "https://gitea.com/acme/config.git",
+        "https://codeberg.org/acme/config.git",
+        "https://gitea.example.com/acme/config.git",
         "https://github.example.com/acme/config.git",
         "https://gitlab.com.example.org/acme/config.git",
         "git@github.com.evil.example:acme/config.git",
@@ -150,6 +170,12 @@ fn auto_recognises_the_public_hosts_and_nothing_else() {
     assert_eq!(ready(&state).api, "https://git.example.com/api/v3");
     set(&state, &[(HOST_KEY, json!("gitlab"))], &[]);
     assert_eq!(ready(&state).api, "https://git.example.com/api/v4");
+    set(&state, &[(HOST_KEY, json!("gitea"))], &[]);
+    let t = ready(&state);
+    assert_eq!(
+        (t.kind, t.api.as_str(), t.repository.as_str()),
+        (Kind::Gitea, "https://git.example.com/api/v1", "acme/config")
+    );
     set(
         &state,
         &[(HOST_API_KEY, json!("https://api.git.example.com/v4/"))],
@@ -168,10 +194,26 @@ fn auto_recognises_the_public_hosts_and_nothing_else() {
     set(&state, &[(HOST_KEY, json!("none"))], &[]);
     assert!(matches!(state.git.host_setup(), Setup::Off(_)));
 
-    // This kind names a repository owner/repo, nothing deeper.
+    // These kinds name a repository owner/repo, nothing deeper.
     let state = configured("https://git.example.com/acme/team/config.git");
-    set(&state, &[(HOST_KEY, json!("github"))], &[]);
-    assert!(matches!(state.git.host_setup(), Setup::Problem(..)));
+    for kind in ["github", "gitea"] {
+        set(&state, &[(HOST_KEY, json!(kind))], &[]);
+        assert!(
+            matches!(state.git.host_setup(), Setup::Problem(..)),
+            "{kind}"
+        );
+    }
+    // A named kind without a public host never takes a public API, even
+    // for a repository on another kind's public host.
+    let state = configured("https://github.com/acme/config.git");
+    set(
+        &state,
+        &[(HOST_KEY, json!("gitea"))],
+        &[(TOKEN_KEY, Some("remote-token-1234"))],
+    );
+    let t = ready(&state);
+    assert_eq!(t.api, "https://github.com/api/v1");
+    assert_eq!(t.token_from, Some(TOKEN_KEY));
 }
 
 #[test]
@@ -248,7 +290,7 @@ fn the_api_setting_is_checked() {
     }
     // A host kind is one of the names, nothing free.
     let mut values = BTreeMap::new();
-    values.insert(HOST_KEY.to_string(), json!("gitea"));
+    values.insert(HOST_KEY.to_string(), json!("forgejo"));
     assert!(state
         .settings
         .update(values, BTreeMap::new(), "test")
@@ -336,11 +378,8 @@ async fn a_pull_request_is_opened_with_the_right_base_and_head() {
         // The address and the number are the host's answer.
         let pr = &r["untrusted_pull_request"];
         assert_eq!(pr["number"], json!(1), "{kind}: {r}");
-        let url = pr["url"].as_str().expect("url");
-        match kind {
-            "github" => assert_eq!(url, "https://github.example/acme/remote/pull/1"),
-            _ => assert_eq!(url, "https://gitlab.example/acme/remote/-/merge_requests/1"),
-        }
+        assert_eq!(pr["url"], json!(address(kind, 1)), "{kind}: {r}");
+        assert!(r.get("already_open").is_none(), "{kind}: {r}");
         // They are not in the instance's own words.
         let detail = r["detail"].as_str().expect("detail");
         assert!(!detail.contains("example"), "{detail}");
@@ -350,15 +389,18 @@ async fn a_pull_request_is_opened_with_the_right_base_and_head() {
         // branch the instance is on.
         assert_eq!(fake.call_count(), 1, "{kind}");
         let call = fake.last_call();
-        assert_eq!(call["authorization"], json!(format!("Bearer {WRITER}")));
+        // The token in the kind's own scheme.
+        let scheme = if kind == "gitea" { "token" } else { "Bearer" };
+        assert_eq!(call["authorization"], json!(format!("{scheme} {WRITER}")));
+        assert_eq!(call["method"], json!("POST"));
         let (path, head, base, text) = match kind {
-            "github" => ("/repos/acme/remote/pulls", "head", "base", "body"),
-            _ => (
+            "gitlab" => (
                 "/projects/acme/remote/merge_requests",
                 "source_branch",
                 "target_branch",
                 "description",
             ),
+            _ => ("/repos/acme/remote/pulls", "head", "base", "body"),
         };
         assert_eq!(call["path"], json!(path), "{kind}: {call}");
         assert_eq!(call["body"][head], json!("review/b"), "{kind}: {call}");
@@ -436,7 +478,12 @@ async fn a_host_that_does_not_open_it_leaves_the_branch_pushed() {
         let said = r["not_opened"]["untrusted_host_message"]
             .as_str()
             .expect("the host's words");
-        assert!(said.contains("orbidden") || said.contains("not accessible"));
+        assert!(
+            said.contains("orbidden")
+                || said.contains("not accessible")
+                || said.contains("required scope"),
+            "{said}"
+        );
         assert!(!detail.contains(said), "{detail}");
 
         // A token the host does not know.
@@ -462,7 +509,14 @@ async fn a_host_that_does_not_open_it_leaves_the_branch_pushed() {
             .await
             .expect("resolve");
         assert_eq!(r["opened"], json!(false), "{kind}: {r}");
-        assert_eq!(r["not_opened"]["reason"], json!("refused"), "{kind}: {r}");
+        // (The third kind's API answers "not found" for a branch too.)
+        let reason = if kind == "gitea" {
+            "not_found"
+        } else {
+            "refused"
+        };
+        assert_eq!(r["not_opened"]["reason"], json!(reason), "{kind}: {r}");
+        assert!(r.get("already_open").is_none(), "{kind}: {r}");
         assert!(remote_has(root.path(), "review/unknown"));
         fake.keeps(&root.path().join("acme").join("remote.git"));
 
@@ -687,11 +741,7 @@ async fn a_host_outside_the_outbound_policy_is_refused_before_any_call() {
             body: "b",
         };
         let target = Target {
-            kind: if kind == "github" {
-                Kind::Github
-            } else {
-                Kind::Gitlab
-            },
+            kind: Kind::named(kind).expect("kind"),
             api: fake.api.clone(),
             repository: repository(kind).to_string(),
             token_from: Some(HOST_TOKEN_KEY),
@@ -740,8 +790,328 @@ async fn a_host_outside_the_outbound_policy_is_refused_before_any_call() {
             .await
             .expect_err("refused");
         assert_eq!(not.reason, "egress_refused", "{not:?}");
+        // The read that looks for an open pull request goes out the same
+        // way: refused alike, and "none found".
+        assert_eq!(state.git.existing_at_host(&target, WRITER, &pr).await, None);
         assert_eq!(fake.call_count(), 0);
     }
+}
+
+#[tokio::test]
+async fn a_pull_request_that_is_already_open_is_answered() {
+    if !git_installed() {
+        return;
+    }
+    for kind in KINDS {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (b, fake) = with_host(root.path(), kind, Some(WRITER)).await;
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["opened"], json!(true), "{kind}: {r}");
+        assert_eq!((fake.count_of("POST"), fake.count_of("GET")), (1, 0));
+
+        // A preview of the same again calls nothing.
+        let mut preview = open_to("review/b");
+        preview.dry_run = true;
+        let r = b.git.resolve(&b, &preview, "bob").await.expect("preview");
+        assert!(r["would_open"].is_object(), "{kind}: {r}");
+        assert_eq!(fake.call_count(), 1, "{kind}: a preview called the host");
+
+        // The same again: the host refuses a second one, and the one that
+        // is open is answered instead of the refusal.
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["pushed"], json!(true), "{kind}: {r}");
+        assert_eq!(r["opened"], json!(false), "{kind}: {r}");
+        assert_eq!(r["already_open"], json!(true), "{kind}: {r}");
+        assert!(r.get("not_opened").is_none(), "{kind}: {r}");
+        assert_eq!(r["host"]["kind"], json!(kind));
+        let pr = &r["untrusted_pull_request"];
+        assert_eq!(pr["number"], json!(1), "{kind}: {r}");
+        assert_eq!(pr["url"], json!(address(kind, 1)), "{kind}: {r}");
+        // The host's answer is not in the instance's own words.
+        let detail = r["detail"].as_str().expect("detail");
+        assert!(detail.contains("was already open"), "{detail}");
+        assert!(!detail.contains("example"), "{detail}");
+        // The opening call was made once more and never again; one read
+        // followed it, for the two branches, with the token in the kind's
+        // scheme and nothing in a body.
+        assert_eq!(
+            (fake.count_of("POST"), fake.count_of("GET")),
+            (2, 1),
+            "{kind}"
+        );
+        let read = fake.last_call();
+        assert_eq!(read["method"], json!("GET"), "{kind}: {read}");
+        let scheme = if kind == "gitea" { "token" } else { "Bearer" };
+        assert_eq!(read["authorization"], json!(format!("{scheme} {WRITER}")));
+        let query = &read["body"];
+        match kind {
+            "github" => {
+                assert_eq!(read["path"], json!("/repos/acme/remote/pulls"));
+                assert_eq!(query["state"], json!("open"), "{read}");
+                assert_eq!(query["head"], json!("acme:review/b"), "{read}");
+                assert_eq!(query["base"], json!("main"), "{read}");
+            }
+            "gitlab" => {
+                assert_eq!(read["path"], json!("/projects/acme/remote/merge_requests"));
+                assert_eq!(query["state"], json!("opened"), "{read}");
+                assert_eq!(query["source_branch"], json!("review/b"), "{read}");
+                assert_eq!(query["target_branch"], json!("main"), "{read}");
+            }
+            _ => {
+                assert_eq!(read["path"], json!("/repos/acme/remote/pulls"));
+                assert_eq!(query["state"], json!("open"), "{read}");
+            }
+        }
+        // It is in the audit log as what it was.
+        let status = b.git.status(&b, false).await;
+        assert_eq!(status["last"]["ok"], json!(true), "{status}");
+
+        // Another branch into the same base is another pull request: the
+        // first one is not mistaken for it.
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/c"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["opened"], json!(true), "{kind}: {r}");
+        assert_eq!(r["untrusted_pull_request"]["number"], json!(2));
+        assert_eq!(fake.count_of("GET"), 1, "{kind}: a read without a refusal");
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["already_open"], json!(true), "{kind}: {r}");
+        assert_eq!(r["untrusted_pull_request"]["number"], json!(1), "{r}");
+
+        // What the list answers is the host's: an entry for other branches
+        // is never taken, whatever the host put first.
+        let entry = |head: &str, base: &str, number: u64, url: &str| {
+            json!({
+                "number": number, "iid": number, "state": if kind == "gitlab" { "opened" } else { "open" },
+                "html_url": url, "web_url": url,
+                "head": { "ref": head }, "base": { "ref": base },
+                "source_branch": head, "target_branch": base,
+            })
+        };
+        fake.lists(json!([
+            entry("review/other", "main", 70, "https://elsewhere.example/70"),
+            entry("review/b", "release", 71, "https://elsewhere.example/71"),
+        ]));
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["opened"], json!(false), "{kind}: {r}");
+        assert!(r.get("already_open").is_none(), "{kind}: {r}");
+        assert!(r.get("untrusted_pull_request").is_none(), "{kind}: {r}");
+        assert_eq!(r["not_opened"]["reason"], json!("refused"), "{kind}: {r}");
+        assert!(r["not_opened"]["untrusted_host_message"]
+            .as_str()
+            .is_some_and(|m| m.to_ascii_lowercase().contains("already exists")));
+        // One that is closed or merged is not an open one.
+        let mut closed = entry("review/b", "main", 72, "https://elsewhere.example/72");
+        closed["state"] = json!("closed");
+        fake.lists(json!([closed]));
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert!(r.get("already_open").is_none(), "{kind}: {r}");
+        // An address that is not a web address is not passed on as one,
+        // and a host that says more than is ever read is cut, not trusted.
+        fake.lists(json!([entry(
+            "review/b",
+            "main",
+            73,
+            "javascript:alert(1)"
+        )]));
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["already_open"], json!(true), "{kind}: {r}");
+        assert_eq!(
+            r["untrusted_pull_request"],
+            json!({ "number": 73, "url": null })
+        );
+        fake.lists(json!({ "message": "not a list" }));
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["not_opened"]["reason"], json!("refused"), "{kind}: {r}");
+
+        // The read follows no redirect either: an API that moved finds
+        // nothing, and where it points is not called.
+        let ask = |api: &str| Target {
+            kind: Kind::named(kind).expect("kind"),
+            api: api.to_string(),
+            repository: repository(kind).to_string(),
+            token_from: Some(HOST_TOKEN_KEY),
+        };
+        let wanted = host::PullRequest {
+            repository: repository(kind),
+            base: "main",
+            head: "review/b",
+            title: "t",
+            body: "b",
+        };
+        fake.lists(json!([entry(
+            "review/b",
+            "main",
+            74,
+            "https://elsewhere.example/74"
+        )]));
+        assert_eq!(
+            b.git
+                .existing_at_host(&ask(&fake.api), WRITER, &wanted)
+                .await
+                .and_then(|found| found.number),
+            Some(74),
+            "{kind}"
+        );
+        let before = fake.call_count();
+        assert_eq!(
+            b.git
+                .existing_at_host(&ask(&fake.redirecting_api), WRITER, &wanted)
+                .await,
+            None,
+            "{kind}: the read followed a redirect"
+        );
+        assert_eq!(fake.call_count(), before + 1, "{kind}");
+        assert_eq!(fake.last_call()["redirected"], json!(true));
+
+        // A list that fails leaves the refusal as it was.
+        fake.list_fails();
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["opened"], json!(false), "{kind}: {r}");
+        assert_eq!(r["not_opened"]["reason"], json!("refused"), "{kind}: {r}");
+        assert!(r.get("already_open").is_none(), "{kind}: {r}");
+
+        // A refusal that is about the token is not looked into: no read.
+        let reads = fake.count_of("GET");
+        set(&b, &[], &[(HOST_TOKEN_KEY, Some(READER))]);
+        let r = b
+            .git
+            .resolve(&b, &open_to("review/b"), "bob")
+            .await
+            .expect("resolve");
+        assert_eq!(r["not_opened"]["reason"], json!("not_permitted"), "{r}");
+        assert_eq!(fake.count_of("GET"), reads, "{kind}: a read for a 403");
+    }
+}
+
+#[test]
+fn a_named_host_that_is_not_ready_is_in_the_diagnostics() {
+    const ID: &str = "source_control_host";
+    let warned = |state: &AppState, words: &[&str]| {
+        let c = check_of(state, ID).expect("the check");
+        assert_eq!(c["status"], json!("warn"), "{c}");
+        let message = c["message"].as_str().expect("message");
+        for word in words {
+            assert!(message.contains(word), "{word} not in {message}");
+        }
+        assert!(c["fix"].as_str().is_some_and(|f| !f.is_empty()), "{c}");
+    };
+    // Nothing to say: no repository, none, auto on no public host.
+    let state = test_state_with(Config::for_tests());
+    assert!(check_of(&state, ID).is_none());
+    set(&state, &[(HOST_KEY, json!("gitea"))], &[]);
+    assert!(check_of(&state, ID).is_none(), "no repository");
+    let state = configured("https://git.example.com/acme/config.git");
+    assert!(check_of(&state, ID).is_none(), "auto, not a public host");
+    set(&state, &[(HOST_KEY, json!("none"))], &[]);
+    assert!(check_of(&state, ID).is_none(), "none");
+
+    for kind in KINDS {
+        // Named, no token.
+        set(&state, &[(HOST_KEY, json!(kind))], &[]);
+        warned(&state, &[kind, HOST_TOKEN_KEY, "https://git.example.com"]);
+        // The remote's token does not serve an API on another host.
+        set(
+            &state,
+            &[(HOST_API_KEY, json!("https://api.git.example.com/v9"))],
+            &[(TOKEN_KEY, Some("remote-token-1234"))],
+        );
+        warned(&state, &[HOST_TOKEN_KEY, "https://api.git.example.com"]);
+        // With a token it is ready.
+        set(&state, &[], &[(HOST_TOKEN_KEY, Some("host-token-5678"))]);
+        let c = check_of(&state, ID).expect("the check");
+        assert_eq!(c["status"], json!("ok"), "{kind}: {c}");
+        assert_eq!(c["fix"], Value::Null);
+        // An API the outbound policy refuses, whatever is allowed.
+        set(
+            &state,
+            &[(HOST_API_KEY, json!("https://169.254.169.254/api"))],
+            &[],
+        );
+        warned(&state, &["outbound policy", "always refused"]);
+        // An API address that fails its rules cannot be stored; one that
+        // is there all the same (an older file) is said.
+        set(&state, &[(HOST_API_KEY, json!(""))], &[]);
+        let c = check_of(&state, ID).expect("the check");
+        assert_eq!(c["status"], json!("ok"), "{kind}: {c}");
+        // No credential in any of it.
+        let report = crate::diagnostics::report(&state).to_string();
+        for secret in ["host-token-5678", "remote-token-1234"] {
+            assert!(!report.contains(secret), "{kind}: {secret} in {report}");
+        }
+        set(&state, &[], &[(HOST_TOKEN_KEY, None), (TOKEN_KEY, None)]);
+    }
+
+    // A repository name the kind cannot read.
+    let state = configured("https://git.example.com/acme/team/config.git");
+    set(
+        &state,
+        &[(HOST_KEY, json!("gitea"))],
+        &[(HOST_TOKEN_KEY, Some("host-token-5678"))],
+    );
+    warned(&state, &["gitea", "owner/repo"]);
+    let state = configured("https://git.example.com/config.git");
+    set(&state, &[(HOST_KEY, json!("gitlab"))], &[]);
+    warned(&state, &["gitlab", "does not read as a repository"]);
+
+    // auto on a public host: a token makes it ready; without one nothing
+    // was asked for, so nothing is wrong, and the check says what would
+    // make the host open pull requests.
+    let state = configured("git@github.com:acme/config.git");
+    let c = check_of(&state, ID).expect("the check");
+    assert_eq!(c["status"], json!("ok"), "{c}");
+    assert!(c["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("by hand") && m.contains(HOST_TOKEN_KEY)));
+    set(&state, &[], &[(HOST_TOKEN_KEY, Some("host-token-5678"))]);
+    let c = check_of(&state, ID).expect("the check");
+    assert_eq!(c["status"], json!("ok"), "{c}");
+    assert!(c["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("https://api.github.com")));
+    // Named on purpose, the same host without a token is a warning.
+    set(
+        &state,
+        &[(HOST_KEY, json!("github"))],
+        &[(HOST_TOKEN_KEY, None)],
+    );
+    warned(&state, &["github", HOST_TOKEN_KEY]);
+    // The diagnostics as a whole are no better than the check.
+    assert_ne!(crate::diagnostics::report(&state)["status"], json!("ok"));
 }
 
 #[derive(Clone, Default)]
@@ -902,7 +1272,9 @@ async fn the_token_is_in_no_answer_log_line_or_audit_entry() {
         // The address the host answered is in the answer and nowhere the
         // instance writes for itself.
         assert!(seen.contains("untrusted_pull_request"));
-        assert!(!logged.contains("github.example") && !logged.contains("gitlab.example"));
+        for theirs in ["github.example", "gitlab.example", "gitea.example"] {
+            assert!(!logged.contains(theirs), "{kind}: {theirs} logged");
+        }
     }
 }
 

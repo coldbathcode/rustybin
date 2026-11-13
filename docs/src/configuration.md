@@ -156,7 +156,8 @@ default) with the secret `git.signing_key` for [signed
 commits](source-control.md#signed-commits), and `git.verify` (off by default) with
 `git.allowed_signers` (names and public keys, at most 50) for [verified
 pulls](source-control.md#verified-pulls), and `git.host` (`auto` by default: `auto`,
-`none`, `github` or `gitlab`), `git.host_api` (a self-hosted host's API, `https` only)
+`none`, `github`, `gitlab` or `gitea`, which is Gitea and Forgejo), `git.host_api` (a
+self-hosted host's API, `https` only)
 and the secret `git.host_token` for a [pull request opened by the git
 host](source-control.md#opened-by-the-git-host). No document sets any of them from the
 repository, and `git.branch` changes with a [switch of

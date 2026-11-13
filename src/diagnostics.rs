@@ -267,6 +267,11 @@ pub fn report(state: &AppState) -> Value {
         });
     }
 
+    // A git host that is named: a pull request can be opened there.
+    if let Some((status, message, fix)) = state.git.host_diagnostics() {
+        checks.push(check("source_control_host", status, message, fix));
+    }
+
     // The sign-in.
     checks.push(
         if crate::login::enabled(config) && crate::login::default_password(state) {
@@ -393,7 +398,7 @@ pub fn catalog() -> Vec<Endpoint> {
         PATH,
         &["GET"],
         category::CONTROL,
-        "Instance diagnostics: storage, the secrets key, load errors, listeners, outbound refusals, source control, the sign-in (admin)",
+        "Instance diagnostics: storage, the secrets key, load errors, listeners, outbound refusals, source control and its git host, the sign-in (admin)",
     )
 .permission(crate::rbac::Permission::SettingsRead)
     .description(

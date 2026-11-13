@@ -254,7 +254,7 @@ pub fn specs() -> Vec<Spec> {
             HOST_KEY,
             "git",
             "Git host",
-            "Whose API opens a pull request for a diverged branch (resolve with pull_request and open): auto recognises github.com and gitlab.com from the repository's host and is none for anything else; none never calls a host; github or gitlab names the kind of a self-hosted host. Only ever opens a pull request: never merges, reviews or comments.",
+            "Whose API opens a pull request for a diverged branch (resolve with pull_request and open): auto recognises github.com and gitlab.com from the repository's host and is none for anything else; none never calls a host; github, gitlab or gitea (Gitea and Forgejo, which auto never recognises) names the kind of a self-hosted host. Only ever opens a pull request, or finds the one already open: never merges, reviews or comments.",
             Kind::Choice {
                 options: HOST_OPTIONS,
             },
@@ -264,7 +264,7 @@ pub fn specs() -> Vec<Spec> {
             HOST_API_KEY,
             "git",
             "Git host API",
-            "The base URL of a self-hosted git host's API (https://git.example.com/api/v3 for the github kind, https://git.example.com/api/v4 for gitlab). Empty: the public host's API, else the kind's usual path on the repository's host. Its host is allowed by the outbound policy (purpose git_host) once set.",
+            "The base URL of a self-hosted git host's API (https://git.example.com/api/v3 for the github kind, https://git.example.com/api/v4 for gitlab, https://git.example.com/api/v1 for gitea). Empty: the public host's API, else the kind's usual path on the repository's host. Its host is allowed by the outbound policy (purpose git_host) once set.",
             Kind::Text { max_len: 512 },
             Value::Null,
         )

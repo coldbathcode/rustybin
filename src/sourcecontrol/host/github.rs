@@ -1,22 +1,27 @@
 //! GitHub, and GitHub Enterprise Server through `git.host_api`: one call,
-//! `POST {api}/repos/{owner}/{repo}/pulls`.
+//! `POST {api}/repos/{owner}/{repo}/pulls`, and one read when that is
+//! refused, `GET {api}/repos/{owner}/{repo}/pulls?state=open&head=..&base=..`.
 
 use serde_json::{json, Value};
 
-use super::{Call, Host, Opened, PullRequest};
+use super::{with_query, Call, Host, Opened, PullRequest};
 
 /// The REST API version asked for.
 const API_VERSION: &str = "2022-11-28";
 
 pub struct Github;
 
-impl Host for Github {
-    fn public_host(&self) -> &'static str {
-        "github.com"
-    }
+fn headers(token: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("Authorization", format!("Bearer {token}")),
+        ("Accept", "application/vnd.github+json".to_string()),
+        ("X-GitHub-Api-Version", API_VERSION.to_string()),
+    ]
+}
 
-    fn public_api(&self) -> &'static str {
-        "https://api.github.com"
+impl Host for Github {
+    fn public(&self) -> Option<(&'static str, &'static str)> {
+        Some(("github.com", "https://api.github.com"))
     }
 
     fn self_hosted_api(&self, host: &str) -> String {
@@ -36,18 +41,45 @@ impl Host for Github {
     fn open(&self, api: &str, token: &str, pr: &PullRequest) -> Call {
         Call {
             url: format!("{api}/repos/{}/pulls", pr.repository),
-            headers: vec![
-                ("Authorization", format!("Bearer {token}")),
-                ("Accept", "application/vnd.github+json".to_string()),
-                ("X-GitHub-Api-Version", API_VERSION.to_string()),
-            ],
-            body: json!({
+            headers: headers(token),
+            body: Some(json!({
                 "title": pr.title,
                 "head": pr.head,
                 "base": pr.base,
                 "body": pr.body,
-            }),
+            })),
         }
+    }
+
+    /// The open pull requests from `owner:head` into `base` (the list's
+    /// `head` filter names the branch with its owner).
+    fn existing(&self, api: &str, token: &str, pr: &PullRequest) -> Call {
+        let owner = pr.repository.split('/').next().unwrap_or("");
+        Call {
+            url: with_query(
+                &format!("{api}/repos/{}/pulls", pr.repository),
+                &[
+                    ("state", "open"),
+                    ("head", &format!("{owner}:{}", pr.head)),
+                    ("base", pr.base),
+                    ("per_page", "5"),
+                ],
+            ),
+            headers: headers(token),
+            body: None,
+        }
+    }
+
+    fn found(&self, answer: &Value, pr: &PullRequest) -> Option<Opened> {
+        answer
+            .as_array()?
+            .iter()
+            .find(|p| {
+                p["head"]["ref"].as_str() == Some(pr.head)
+                    && p["base"]["ref"].as_str() == Some(pr.base)
+                    && p["state"].as_str().is_none_or(|s| s == "open")
+            })
+            .map(|p| self.opened(p))
     }
 
     fn opened(&self, answer: &Value) -> Opened {

@@ -4552,11 +4552,16 @@ async fn git(ctx: &mut Ctx, verb: &str) -> Result<()> {
                 let pr = &v["untrusted_pull_request"];
                 if pr.is_object() {
                     ctx.raw(&format!(
-                        "  pull request{}{}",
+                        "  pull request{}{}{}",
                         pr["number"]
                             .as_u64()
                             .map(|n| format!(" {n}"))
                             .unwrap_or_default(),
+                        if v["already_open"] == json!(true) {
+                            " (already open)"
+                        } else {
+                            ""
+                        },
                         pr["url"]
                             .as_str()
                             .map(|u| format!(": {}", printable(u)))

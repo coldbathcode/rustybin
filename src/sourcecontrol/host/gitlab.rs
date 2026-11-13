@@ -1,20 +1,24 @@
 //! GitLab, and a self-managed GitLab through `git.host_api`: one call,
 //! `POST {api}/projects/{path}/merge_requests` (a merge request is this
-//! host's pull request).
+//! host's pull request), and one read when that is refused,
+//! `GET {api}/projects/{path}/merge_requests?state=opened&source_branch=..&target_branch=..`.
 
 use serde_json::{json, Value};
 
-use super::{Call, Host, Opened, PullRequest};
+use super::{with_query, Call, Host, Opened, PullRequest};
 
 pub struct Gitlab;
 
-impl Host for Gitlab {
-    fn public_host(&self) -> &'static str {
-        "gitlab.com"
-    }
+fn headers(token: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("Authorization", format!("Bearer {token}")),
+        ("Accept", "application/json".to_string()),
+    ]
+}
 
-    fn public_api(&self) -> &'static str {
-        "https://gitlab.com/api/v4"
+impl Host for Gitlab {
+    fn public(&self) -> Option<(&'static str, &'static str)> {
+        Some(("gitlab.com", "https://gitlab.com/api/v4"))
     }
 
     fn self_hosted_api(&self, host: &str) -> String {
@@ -31,17 +35,42 @@ impl Host for Gitlab {
     fn open(&self, api: &str, token: &str, pr: &PullRequest) -> Call {
         Call {
             url: format!("{api}/projects/{}/merge_requests", pr.repository),
-            headers: vec![
-                ("Authorization", format!("Bearer {token}")),
-                ("Accept", "application/json".to_string()),
-            ],
-            body: json!({
+            headers: headers(token),
+            body: Some(json!({
                 "source_branch": pr.head,
                 "target_branch": pr.base,
                 "title": pr.title,
                 "description": pr.body,
-            }),
+            })),
         }
+    }
+
+    fn existing(&self, api: &str, token: &str, pr: &PullRequest) -> Call {
+        Call {
+            url: with_query(
+                &format!("{api}/projects/{}/merge_requests", pr.repository),
+                &[
+                    ("state", "opened"),
+                    ("source_branch", pr.head),
+                    ("target_branch", pr.base),
+                    ("per_page", "5"),
+                ],
+            ),
+            headers: headers(token),
+            body: None,
+        }
+    }
+
+    fn found(&self, answer: &Value, pr: &PullRequest) -> Option<Opened> {
+        answer
+            .as_array()?
+            .iter()
+            .find(|m| {
+                m["source_branch"].as_str() == Some(pr.head)
+                    && m["target_branch"].as_str() == Some(pr.base)
+                    && m["state"].as_str().is_none_or(|s| s == "opened")
+            })
+            .map(|m| self.opened(m))
     }
 
     fn opened(&self, answer: &Value) -> Opened {

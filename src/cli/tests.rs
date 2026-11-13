@@ -1744,6 +1744,20 @@ async fn git_resolve_open_asks_the_git_host() {
     );
     assert_eq!(fake.last_call()["body"]["target_branch"], json!("main"));
 
+    // The same again: the host has it open, and that one is printed as
+    // what it is.
+    let (code, text) = inst.run(None, &[&open[..], &["--yes"]].concat()).await;
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("was already open"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "pull request 1 (already open): https://gitlab.example/{repository}/-/merge_requests/1"
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("the git host said"), "{text}");
+    assert_eq!((fake.count_of("POST"), fake.count_of("GET")), (2, 1));
+
     // A host that refuses: the branch is pushed, so the command succeeds
     // and says why there is no pull request.
     token(READER);
