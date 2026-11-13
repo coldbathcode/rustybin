@@ -38,7 +38,7 @@ The marker a session looks for is the first row that is not done.
 | [11](step-11-source-control.md) | Source control: branches per environment, signed commits, a divergence resolved by naming a side or through a pull request, `file:` references for the harness section | done 2026-11-09 |
 | [12](step-12-agent-secrets-and-sign-in.md) | Agents: secrets with an out-of-band confirmation; an interactive sign-in from the CLI | done 2026-11-09 |
 | [13](step-13-harness-follow-ups.md) | Harness: scenario import, HTTP/3 targets, server-to-server chains | done 2026-11-09 |
-| [14](step-14-release-0-7.md) | Release 0.7.0: steps 11 to 13 pushed, tagged, the signed image and its digest | the owner's to start, section 6 |
+| [14](step-14-release-0-7.md) | Release 0.7.0: steps 11 to 13 pushed, tagged, the signed image and its digest | done 2026-11-13: `v0.7.0` holds steps 11 to 13, 15 to 22 and demo next 01 to 09; images `sha256:84663e342a16...` and `-http3` `sha256:ccd4d92597c4...`, both in the changelog |
 | [15](step-15-client-id-metadata-documents.md) | MCP inspector: client ID metadata documents (and whether the control plane accepts one) | done 2026-11-12 (parts A and B; part B off by default, the recommendation) |
 | [16](step-16-chain-metrics.md) | Harness: a Prometheus series for chain calls | done 2026-11-12 |
 | [17](step-17-secret-request-follow-ups.md) | Secret requests: a count outside Management, a note on a decline, a user sees their own agents' requests | done 2026-11-12 |
@@ -49,10 +49,10 @@ The marker a session looks for is the first row that is not done.
 | [22](step-22-http3-image.md) | An image with HTTP/3 | done 2026-11-12 (a second image with the suffix `-http3`, the recommendation) |
 | [23](step-23-visitor-oauth.md) | OAuth sign-in for visitors and key holders | waits for the owner, section 6 |
 | [24](step-24-self-service-replicas.md) | Self-service across replicas | waits for the owner, section 6 |
-| [25](step-25-release-0-8.md) | Release 0.8.0: whichever of 15 to 24 are built | the owner's to start, section 6 |
+| [25](step-25-release-0-8.md) | Release 0.8.0: whichever of 15 to 24 are built | folded into 0.7.0 on 2026-11-13 (the owner chose one release of everything on `main`); no 0.8.0 is owed |
 | [26](step-26-open-the-demo.md) | The demo on the current release, and open to visitors | the owner's to start, section 6 |
 
-Released as 0.6.0 after step 10. Steps 11 to 13 are built and merged, and are released when the owner says so.
+Released as 0.6.0 after step 10, and as 0.7.0 on 2026-11-13 after steps 11 to 13 and 15 to 22. What is left is step 26 (the demo), the owner's to start, and steps 23 and 24, recommended against.
 
 ## 4. Why steps 11 to 13 stopped
 

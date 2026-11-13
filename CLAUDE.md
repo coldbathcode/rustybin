@@ -75,12 +75,12 @@ untouched), and what reads finished runs does so after the fact (`harness/otlp.r
 the parallel suite, not alone; a Hurl body in an included example is bare JSON, never a fenced block, which closes the
 page's own fence.
 
-## Core next steps 11 to 13 (built and merged 2026-11-09, not released)
+## Core next steps 11 to 13 (built and merged 2026-11-09, released in 0.7.0)
 
 The owner said "build it all out" on 2026-11-09; section 5 of
 [docs/plans/core-next/master-plan.md](docs/plans/core-next/master-plan.md) records the choice each step took
-(the one that keeps the rule it touches), each step file has build notes, and the changelog's "Unreleased"
-section lists what is new. A release waits for the owner's word.
+(the one that keeps the rule it touches), each step file has build notes, and the changelog's 0.7.0
+section lists what is new.
 
 Steps 14 to 26 of the same plan (planned 2026-11-09, section 6: the order, a table of decisions for the owner
 with a recommendation each, one step file each) were everything left. Steps 15 to 22 are built, see "Core next
@@ -136,7 +136,17 @@ hops `safety::pin_chain` pinned; a field added to the marker goes inside its sig
 a client's marker byte for byte what it was; an onward call is never counted with the clients'
 arrivals.
 
-## Core next steps 15 to 22 (built 2026-11-12 and 2026-11-13)
+## Rustybin 0.7, new features for gateway demos (released 2026-11-13)
+
+`v0.7.0` is one release of everything that was on `main`: core next steps 11 to 13 and 15 to 22 and demo next
+steps 01 to 09 (the owner's choice of 2026-11-12; no 0.8.0 or 0.9.0 is owed). Two signed images, the default
+and `0.7.0-http3`, with both digests in the changelog. Rules the release left: CI's clippy is the newest
+stable, so run clippy on a current toolchain before a push (`rustup update stable`); the SDK conformance
+suites (`conformance/{ai,mcp,a2a,oauth}/run.sh`) are part of a step's checks, since a new management prompt
+or tool can fail them; a child process is started by a program's path (`sourcecontrol::git_program`), never
+a bare name with a changed `PATH`, which forks the whole process.
+
+## Core next steps 15 to 22 (built 2026-11-12 and 2026-11-13, released in 0.7.0)
 
 The owner chose "all buildable, then release" on 2026-11-12: every step that could be built, each
 decision of section 6 taking its recommendation. Each step file has build notes and its "For the merge"
@@ -223,17 +233,16 @@ records and verifies both digests. The default image, which a public instance ru
 stack. `GET /_rustybin/harness` answers `http3` with the harness off too (the smoke test tells the
 variants apart by it).
 
-## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 09 built, not released)
+## Demo next, new features for gateway demos (planned 2026-11-11, steps 01 to 09 released in 0.7.0)
 
 [docs/plans/demo-next/master-plan.md](docs/plans/demo-next/master-plan.md): nine new features and a
 release, one file each (section 4 is the build marker, section 6 the owner's decisions with a
 recommendation each): AI gateway scenarios, MCP security scenarios, a mock recorded from a real
 upstream, contract drift (steps 01 to 04, built 2026-11-11), demo storyboards and customer demo
 packs, Arazzo workflows, realtime and batch AI APIs and AsyncAPI event mocks (steps 05 to 09, built
-2026-11-12). Each built step file has build notes; the changelog's "Unreleased" section lists what is new.
+2026-11-12). Each built step file has build notes; the changelog's 0.7.0 section lists what is new.
 Step 09 is built as its part A (channels Rustybin serves itself); its part B (Kafka behind a cargo
-feature) waits for the owner's word. Step 10 (the release) is the owner's to start, and core-next step 14
-(the 0.7.0 release) has not been done either.
+feature) waits for the owner's word. Step 10 (the release) was done as 0.7.0 on 2026-11-13.
 
 Step 05 (storyboards; `docs/plans/demo-next/step-05-demo-storyboards.md`, user docs
 `docs/src/storyboards.md`): `src/storyboards/` (`mod.rs`: `Storyboard`, `Step`, `Action`, the store

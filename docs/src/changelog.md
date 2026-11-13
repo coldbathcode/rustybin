@@ -297,6 +297,15 @@ on or name it):
 - A harness scenario written by hand in a document (the shorthand with `target`) was refused
   when applied; it is folded like every other way of saving one.
 
+`cargo` version 0.7.0, the tag `v0.7.0`, and two signed multi-arch images: the default
+`ghcr.io/coldbathcode/rustybin:0.7.0`, digest
+`sha256:84663e342a16caf8a9fea08a9288cffc14673a708db6b33af3b3ed2da35f229b`, and
+`ghcr.io/coldbathcode/rustybin:0.7.0-http3` with HTTP/3 for load tests, digest
+`sha256:ccd4d92597c4a23baec6833347e54ae97a41ac774bc9bea9bd5ff298f6a0b0b1` (verify either with the
+cosign command of the [quick start](quick-start.md#docker); the
+[release](https://github.com/coldbathcode/rustybin/releases/tag/v0.7.0) carries the same
+values, and the Linux and macOS binaries).
+
 ## 0.6.0 (2026-11-07): more from an instance
 
 [The plan](https://github.com/coldbathcode/rustybin/blob/main/docs/plans/core-next/master-plan.md),

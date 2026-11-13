@@ -64,7 +64,7 @@ The marker a session looks for is the first row that is not done.
 | [07](step-07-arazzo-workflows.md) | Arazzo workflows as multi-step saved tests and harness scenarios | | medium | done 2026-11-12 (multi-step tests and a harness import, the recommendation) |
 | [08](step-08-realtime-and-batch-ai.md) | Realtime (WebSocket) and batch AI APIs | | large | done 2026-11-12 (OpenAI-shaped realtime, batch in the OpenAI and Anthropic shapes, the recommendation) |
 | [09](step-09-asyncapi-event-mocks.md) | Event-driven mocks from AsyncAPI | | large | part A done 2026-11-12 (channels served over WebSocket, SSE and webhooks, the recommendation); part B (Kafka) waits for the owner's word |
-| [10](step-10-release.md) | Docs and release | all built | small | the owner's to start |
+| [10](step-10-release.md) | Docs and release | all built | small | done 2026-11-13: released in 0.7.0 with core next steps 11 to 13 and 15 to 22 (one release of everything on `main`, the owner's choice) |
 
 ### Order
 
