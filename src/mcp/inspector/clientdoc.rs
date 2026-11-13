@@ -1,8 +1,17 @@
 //! The inspector as an OAuth client that names itself with a document
-//! (client ID metadata documents): `GET /_rustybin/oauth/inspector-client.json`
+//! (client ID metadata documents): `GET /.well-known/rustybin-inspector-client.json`
 //! describes the console's MCP inspector, and its URL is the client id the
 //! OAuth walk sends to an authorization server that says
 //! `client_id_metadata_document_supported`, with no registration call.
+//!
+//! The document has two addresses. The one the walk sends is on the data
+//! plane ([`DOCUMENT_PATH`]): an authorization server that refuses to call
+//! a Rustybin control plane, as another Rustybin's outbound policy does,
+//! can still fetch it. The address 0.7.0 used ([`LEGACY_DOCUMENT_PATH`],
+//! under `/_rustybin`) keeps answering, for saved connections and for
+//! servers that know the inspector by it. Each address serves the same
+//! document but for its `client_id`, which is the address itself (a server
+//! refuses a document whose `client_id` is not the URL it fetched).
 //!
 //! The document is public and holds nothing secret: who the client says it
 //! is and where the authorization code may be sent (the console's own
@@ -20,6 +29,9 @@ use crate::state::AppState;
 
 /// The document's path, and so the path of the inspector's client id.
 pub const DOCUMENT_PATH: &str = crate::control_oauth::INSPECTOR_CLIENT_PATH;
+/// The document's first address (0.7.0), under the control plane: never
+/// sent by the walk, served for those who kept it.
+pub const LEGACY_DOCUMENT_PATH: &str = crate::control_oauth::INSPECTOR_CLIENT_LEGACY_PATH;
 /// The console's OAuth callback (`ui/app.js`), the walk's redirect URI.
 pub const CALLBACK_PATH: &str = "/ui/callback";
 pub const CLIENT_NAME: &str = "Rustybin MCP inspector";
@@ -39,11 +51,23 @@ pub fn redirect_uri(base: &str) -> String {
     format!("{base}{CALLBACK_PATH}")
 }
 
+/// The inspector's client id of 0.7.0 for an instance reached at `base`:
+/// the document's address under the control plane.
+pub fn legacy_client_id(base: &str) -> String {
+    format!("{base}{LEGACY_DOCUMENT_PATH}")
+}
+
 /// The document for an instance reached at `base` (scheme, host and port,
-/// no trailing slash).
+/// no trailing slash), as its address on the data plane serves it.
 pub fn document(base: &str) -> Value {
+    document_at(base, DOCUMENT_PATH)
+}
+
+/// The document as the address `path` of an instance reached at `base`
+/// serves it: one content, and the `client_id` of the address asked.
+fn document_at(base: &str, path: &str) -> Value {
     json!({
-        "client_id": client_id(base),
+        "client_id": format!("{base}{path}"),
         "client_name": CLIENT_NAME,
         "client_uri": format!("{base}/ui/"),
         "redirect_uris": [redirect_uri(base)],
@@ -86,6 +110,7 @@ pub fn status(base: &str) -> Value {
     let reason = unusable_reason(base);
     json!({
         "url": client_id(base),
+        "legacy_url": legacy_client_id(base),
         "redirect_uri": redirect_uri(base),
         "usable": reason.is_none(),
         "reason": reason,
@@ -104,15 +129,36 @@ pub fn base_url(
     crate::session::request_origin(headers, extensions, uri, &state.config).base_url()
 }
 
-/// `GET /_rustybin/oauth/inspector-client.json`.
+/// `GET /.well-known/rustybin-inspector-client.json`, the address the walk
+/// sends as its client id.
 pub async fn handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     extensions: Extensions,
     uri: Uri,
 ) -> Response {
-    let base = base_url(&headers, &extensions, &uri, &state);
-    let mut resp = Json(document(&base)).into_response();
+    serve(&state, &headers, &extensions, &uri, DOCUMENT_PATH)
+}
+
+/// `GET /_rustybin/oauth/inspector-client.json`, the address of 0.7.0.
+pub async fn legacy_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    extensions: Extensions,
+    uri: Uri,
+) -> Response {
+    serve(&state, &headers, &extensions, &uri, LEGACY_DOCUMENT_PATH)
+}
+
+fn serve(
+    state: &AppState,
+    headers: &HeaderMap,
+    extensions: &Extensions,
+    uri: &Uri,
+    path: &str,
+) -> Response {
+    let base = base_url(headers, extensions, uri, state);
+    let mut resp = Json(document_at(&base, path)).into_response();
     // An authorization server may keep it for a while; nothing in it changes
     // between releases.
     resp.headers_mut().insert(

@@ -663,7 +663,7 @@ The MCP inspector: servers, saved connections, checks, calls through the relay
 | `rustybin mcp tools <target>` | The tools a server offers (tools/list through the relay). Flags: `--header` value, `--connection` value. | `POST /_rustybin/mcp-relay` | `mcp.inspect` |
 | `rustybin mcp fetch <url>` | Fetch an OAuth discovery document through the instance. | `POST /_rustybin/mcp-relay/fetch` | `mcp.inspect` |
 | `rustybin mcp end-relay <session>` | End a relay session. | `DELETE /_rustybin/mcp-relay/{session}` | `mcp.inspect` |
-| `rustybin mcp client-document` | The inspector's client ID metadata document (its client id where an authorization server supports one). | `GET /_rustybin/oauth/inspector-client.json` | open |
+| `rustybin mcp client-document [--legacy]` | The inspector's client ID metadata document (its client id where an authorization server supports one), from its address outside the control plane; --legacy reads the address 0.7.0 used, which names itself as the client id. Flags: `--legacy`. | `GET /.well-known/rustybin-inspector-client.json`, `GET /_rustybin/oauth/inspector-client.json` | open |
 
 ```bash
 rustybin mcp servers

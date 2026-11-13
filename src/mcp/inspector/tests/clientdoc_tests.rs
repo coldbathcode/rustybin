@@ -65,7 +65,7 @@ async fn the_document_is_open_and_its_redirect_is_the_one_the_walk_sends() {
     assert_eq!(status, StatusCode::OK, "{doc}");
     assert_eq!(
         doc["client_id"],
-        format!("{PUBLIC_BASE}/_rustybin/oauth/inspector-client.json")
+        format!("{PUBLIC_BASE}/.well-known/rustybin-inspector-client.json")
     );
     assert_eq!(doc["client_name"], clientdoc::CLIENT_NAME);
     assert_eq!(
@@ -106,6 +106,10 @@ async fn the_document_is_open_and_its_redirect_is_the_one_the_walk_sends() {
     assert_eq!(cd["usable"], true, "{cd}");
     assert_eq!(cd["reason"], Value::Null);
     assert_eq!(cd["url"], doc["client_id"]);
+    assert_eq!(
+        cd["legacy_url"],
+        format!("{PUBLIC_BASE}/_rustybin/oauth/inspector-client.json")
+    );
     assert_eq!(cd["document"], doc);
     assert_eq!(
         cd["redirect_uri"].as_str().map(str::as_bytes),
@@ -122,7 +126,7 @@ async fn a_loopback_or_plain_http_instance_says_why_its_document_cannot_be_used(
     assert_eq!(cd["usable"], false);
     assert_eq!(
         cd["url"],
-        "http://127.0.0.1:8080/_rustybin/oauth/inspector-client.json"
+        "http://127.0.0.1:8080/.well-known/rustybin-inspector-client.json"
     );
     assert!(
         cd["reason"]
@@ -153,6 +157,110 @@ async fn a_loopback_or_plain_http_instance_says_why_its_document_cannot_be_used(
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(doc["redirect_uris"][0], "http://127.0.0.1:8080/ui/callback");
+}
+
+#[tokio::test]
+async fn the_address_of_0_7_0_still_answers_and_names_itself() {
+    // Open where the control plane asks for credentials, as it was.
+    let mut c = public_config();
+    c.control_auth = ControlAuth::Token;
+    c.admin_token = Some("admin-secret".into());
+    let app = test_app_with(test_state_with(c));
+    let (status, new) = call(
+        &app,
+        "GET",
+        clientdoc::DOCUMENT_PATH,
+        PUBLIC_HOST,
+        true,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{new}");
+    let (status, old) = call(
+        &app,
+        "GET",
+        "/_rustybin/oauth/inspector-client.json",
+        PUBLIC_HOST,
+        true,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{old}");
+    // Each address is its own client id: a server refuses a document whose
+    // client_id is not the URL it fetched.
+    assert_eq!(
+        old["client_id"],
+        format!("{PUBLIC_BASE}/_rustybin/oauth/inspector-client.json")
+    );
+    assert_eq!(
+        new["client_id"],
+        format!("{PUBLIC_BASE}/.well-known/rustybin-inspector-client.json")
+    );
+    // Nothing else differs, down to the order of the keys.
+    let mut same = old.clone();
+    same["client_id"] = new["client_id"].clone();
+    assert_eq!(same.to_string(), new.to_string());
+    // The address the walk sends is not on the control plane, so the
+    // outbound policy of another Rustybin can be asked for it; the old one
+    // is, and never can.
+    assert!(!crate::control::is_control_path(clientdoc::DOCUMENT_PATH));
+    assert!(!crate::egress::is_control_prefix(clientdoc::DOCUMENT_PATH));
+    assert!(crate::egress::is_control_prefix(
+        clientdoc::LEGACY_DOCUMENT_PATH
+    ));
+    assert_eq!(
+        clientdoc::client_id(PUBLIC_BASE),
+        new["client_id"].as_str().expect("client id")
+    );
+}
+
+#[tokio::test]
+async fn the_document_needs_no_key_and_opens_nothing_else() {
+    // An instance where every data-plane route needs an API key.
+    let mut c = public_config();
+    c.require_key = true;
+    let app = test_app_with(test_state_with(c));
+    for path in [clientdoc::DOCUMENT_PATH, clientdoc::LEGACY_DOCUMENT_PATH] {
+        let (status, doc) = call(&app, "GET", path, PUBLIC_HOST, true, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {doc}");
+        assert_eq!(doc["client_name"], clientdoc::CLIENT_NAME);
+    }
+    // Its neighbours stay closed, and so does every other method.
+    for path in [
+        "/echo",
+        "/.well-known/rustybin-inspector-client.json/x",
+        "/.well-known/rustybin-inspector-client",
+        "/.well-known/agent-card.json",
+    ] {
+        let (status, _) = call(&app, "GET", path, PUBLIC_HOST, true, None).await;
+        assert!(
+            status == StatusCode::UNAUTHORIZED || status == StatusCode::SERVICE_UNAVAILABLE,
+            "{path}: {status}"
+        );
+    }
+    let (status, _) = call(
+        &app,
+        "POST",
+        clientdoc::DOCUMENT_PATH,
+        PUBLIC_HOST,
+        true,
+        Some(json!({})),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK);
+
+    // Shared mode: the key layer also guards the control plane.
+    let mut c = public_config();
+    c.shared_mode = true;
+    c.public_mode = true;
+    c.admin_token = Some("admin-secret".into());
+    let app = test_app_with(test_state_with(c));
+    for path in [clientdoc::DOCUMENT_PATH, clientdoc::LEGACY_DOCUMENT_PATH] {
+        let (status, doc) = call(&app, "GET", path, PUBLIC_HOST, true, None).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {doc}");
+    }
+    let (status, _) = call(&app, "GET", "/echo", PUBLIC_HOST, true, None).await;
+    assert_ne!(status, StatusCode::OK);
 }
 
 /// An MCP server behind OAuth on a free loopback port, with its
@@ -266,7 +374,7 @@ async fn the_check_offers_the_document_and_never_registers() {
     let sent = authorize_request(&log).expect("an authorization request");
     assert_eq!(
         query_param(&sent, "client_id").as_deref(),
-        Some("https://rustybin.example/_rustybin/oauth/inspector-client.json")
+        Some("https://rustybin.example/.well-known/rustybin-inspector-client.json")
     );
     // The redirect URI is the document's, byte for byte.
     let (_, doc) = call(

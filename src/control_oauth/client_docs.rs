@@ -69,6 +69,37 @@ pub fn on(settings: &Settings) -> bool {
     settings.bool(SETTING)
 }
 
+/// The diagnostics check `client_documents`: the feature is on and the
+/// outbound policy permits no host for it, so every client's document is
+/// refused before any call. `None` (no check) while the feature is off.
+/// Whether anything is permitted is the policy's own answer
+/// ([`crate::egress::Egress::permits_any`]), never a reading of its lists.
+pub fn diagnostics(state: &AppState) -> Option<(&'static str, String, Option<&'static str>)> {
+    if !on(&state.settings) {
+        return None;
+    }
+    let purpose = Purpose::ClientMetadata;
+    Some(if state.egress.permits_any(purpose) {
+        (
+            "ok",
+            format!(
+                "{SETTING} is on and the outbound policy names hosts for purpose {}: a client's document is fetched from those only",
+                purpose.as_str()
+            ),
+            None,
+        )
+    } else {
+        (
+            "warn",
+            format!(
+                "{SETTING} is on but the outbound policy permits no host for purpose {} (it has no default and egress.allow is empty): every client's document is refused before any call, and a sign-in that names one stops at an error page",
+                purpose.as_str()
+            ),
+            Some("name the hosts the clients' documents are served from in egress.allow (Management, Network, or RUSTYBIN_EGRESS_ALLOW), or turn oauth.client_metadata_documents off; GET /_rustybin/egress/check?purpose=client_metadata&url=... says what one URL would be told"),
+        )
+    })
+}
+
 /// Does this client id claim to be a document's URL (rather than a
 /// registered client's signed id)?
 pub fn looks_like_document(id: &str) -> bool {

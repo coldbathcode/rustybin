@@ -18,10 +18,10 @@ jsonpath "$.checks[*].id" contains "tools_call"
 # ANCHOR: client_document
 # The inspector's client ID metadata document: open, nothing secret. Its URL
 # is the client id, and its only redirect URI is the console's callback.
-GET {{base_url}}/_rustybin/oauth/inspector-client.json
+GET {{base_url}}/.well-known/rustybin-inspector-client.json
 HTTP 200
 [Asserts]
-jsonpath "$.client_id" == "{{base_url}}/_rustybin/oauth/inspector-client.json"
+jsonpath "$.client_id" == "{{base_url}}/.well-known/rustybin-inspector-client.json"
 jsonpath "$.client_name" == "Rustybin MCP inspector"
 jsonpath "$.redirect_uris" count == 1
 jsonpath "$.redirect_uris[0]" == "{{base_url}}/ui/callback"
@@ -32,12 +32,26 @@ jsonpath "$.grant_types" contains "authorization_code"
 GET {{base_url}}/_rustybin/mcp-servers
 HTTP 200
 [Asserts]
-jsonpath "$.client_document.url" == "{{base_url}}/_rustybin/oauth/inspector-client.json"
+jsonpath "$.client_document.url" == "{{base_url}}/.well-known/rustybin-inspector-client.json"
 jsonpath "$.client_document.redirect_uri" == "{{base_url}}/ui/callback"
 jsonpath "$.client_document.usable" == false
 jsonpath "$.client_document.reason" contains "loopback"
 jsonpath "$.client_document.ways" contains "document"
 # ANCHOR_END: client_document
+
+# ANCHOR: client_document_legacy
+# The address 0.7.0 used still answers: the same document, naming itself.
+GET {{base_url}}/_rustybin/oauth/inspector-client.json
+HTTP 200
+[Asserts]
+jsonpath "$.client_id" == "{{base_url}}/_rustybin/oauth/inspector-client.json"
+jsonpath "$.redirect_uris[0]" == "{{base_url}}/ui/callback"
+
+GET {{base_url}}/_rustybin/mcp-servers
+HTTP 200
+[Asserts]
+jsonpath "$.client_document.legacy_url" == "{{base_url}}/_rustybin/oauth/inspector-client.json"
+# ANCHOR_END: client_document_legacy
 
 # ANCHOR: client_document_check
 # The check walks the discovery and, where the authorization server says it

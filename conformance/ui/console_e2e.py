@@ -4088,7 +4088,7 @@ def run_client_documents(browser):
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Server)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     server = f"http://127.0.0.1:{srv.server_address[1]}"
-    document_url = BASE + "/_rustybin/oauth/inspector-client.json"
+    document_url = BASE + "/.well-known/rustybin-inspector-client.json"
 
     ctx = browser.new_context(viewport={"width": 1280, "height": 860})
     page = ctx.new_page()

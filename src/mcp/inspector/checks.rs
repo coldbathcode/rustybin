@@ -1389,7 +1389,7 @@ fn code_word(s: &str) -> String {
 
 /// `client_document`: does the authorization server of this MCP server say
 /// it supports client ID metadata documents, and does it take this
-/// instance's (`GET /_rustybin/oauth/inspector-client.json`) as a client?
+/// instance's (`GET /.well-known/rustybin-inspector-client.json`) as a client?
 /// The check walks the discovery a client walks (the protected resource
 /// metadata, the authorization server's) and then starts one authorization
 /// request with the document's URL as `client_id`, following nothing: a

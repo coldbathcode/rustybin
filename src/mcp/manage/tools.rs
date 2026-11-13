@@ -401,7 +401,7 @@ pub static TOOLS: &[ToolDef] = &[
         "confirm": confirm_prop()
     }), &["name", "instruction"])),
     // ── MCP inspector ──
-    tool!("list_mcp_servers", "MCP servers", "Every MCP server this instance serves (the mock server and its protected, API key, named and legacy variants, the management server, each OpenAPI mock's server) with transports, versions and auth, the relay's allowlist, the check ids, and the inspector's client ID metadata document (client_document: its URL, whether an authorization server can use it, and why not).", ToolNeed::Perm(Permission::McpInspect), ro=true, destructive=false, idem=true, confirm=false, no_args),
+    tool!("list_mcp_servers", "MCP servers", "Every MCP server this instance serves (the mock server and its protected, API key, named and legacy variants, the management server, each OpenAPI mock's server) with transports, versions and auth, the relay's allowlist, the check ids, and the inspector's client ID metadata document (client_document: its URL outside the control plane, the address 0.7.0 used as legacy_url, whether an authorization server can use it, and why not).", ToolNeed::Perm(Permission::McpInspect), ro=true, destructive=false, idem=true, confirm=false, no_args),
     ToolDef {
         name: "mcp_call",
         title: "Call an MCP server",

@@ -37,6 +37,7 @@ rustybin doctor --profile prod
 | `source_control_verification` | (only with `git.verify` on) [verified pulls](source-control.md#verified-pulls) can pass something (an allowed signer or a signing key, git 2.38 or later) and the repository's side was not refused: a warning names the commit no allowed signer signed, and nothing of it was applied |
 | `default_password` | the console still accepts the default password |
 | `users` | (password mode) where the users live: `<state>/users.json`, in memory without a state directory (`warn`), or a file that could not be read or written (`fail`; an unreadable file is never written over) |
+| `client_documents` | (only with `oauth.client_metadata_documents` on) the outbound policy permits a host for the purpose `client_metadata`; with none named in `egress.allow` every client's [document](agent-mcp.md#sign-in-with-oauth) is refused before any call (`warn`) |
 | `harness` | load test mode with an engine problem |
 | `assist` | AI assist configured but not usable |
 

@@ -517,7 +517,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("mcp", "tools", "<target>", "The tools a server offers (tools/list through the relay).", &[Flag::value("--header", "An extra header 'Name: value', repeatable"), Flag::value("--connection", "A saved connection to take the credentials from")], [("POST", "/_rustybin/mcp-relay")], false, "mcp tools http://localhost:8080/mcp"),
     cmd!("mcp", "fetch", "<url>", "Fetch an OAuth discovery document through the instance.", NO_FLAGS, [("POST", "/_rustybin/mcp-relay/fetch")], false, "mcp fetch https://mcp.acme.example/.well-known/oauth-authorization-server"),
     cmd!("mcp", "end-relay", "<session>", "End a relay session.", NO_FLAGS, [("DELETE", "/_rustybin/mcp-relay/{session}")], false, "mcp end-relay 5b2c"),
-    cmd!("mcp", "client-document", "", "The inspector's client ID metadata document (its client id where an authorization server supports one).", NO_FLAGS, [("GET", "/_rustybin/oauth/inspector-client.json")], false, "mcp client-document"),
+    cmd!("mcp", "client-document", "[--legacy]", "The inspector's client ID metadata document (its client id where an authorization server supports one), from its address outside the control plane; --legacy reads the address 0.7.0 used, which names itself as the client id.", &[Flag::switch("--legacy", "The document at /_rustybin/oauth/inspector-client.json, the address 0.7.0 used")], [("GET", "/.well-known/rustybin-inspector-client.json"), ("GET", "/_rustybin/oauth/inspector-client.json")], false, "mcp client-document"),
     // ── Registry ──
     cmd!("registry", "status", "", "The mock registry: scenario, entries, capacity.", NO_FLAGS, [("GET", "/_rustybin/registry")], false, "registry status"),
     cmd!("registry", "publish", "<file>", "Publish a server.json to the mock registry (through its publish API).", NO_FLAGS, [], false, "registry publish server.json"),
@@ -3993,7 +3993,14 @@ async fn mcp(ctx: &mut Ctx, verb: &str) -> Result<()> {
     let first = ctx.args.positional.first().cloned().unwrap_or_default();
     match verb {
         "servers" => get(ctx, "/_rustybin/mcp-servers", &[]).await,
-        "client-document" => get(ctx, "/_rustybin/oauth/inspector-client.json", &[]).await,
+        "client-document" => {
+            let path = if ctx.args.has("--legacy") {
+                crate::mcp::inspector::clientdoc::LEGACY_DOCUMENT_PATH
+            } else {
+                crate::mcp::inspector::clientdoc::DOCUMENT_PATH
+            };
+            get(ctx, path, &[]).await
+        }
         "connections" => get(ctx, "/_rustybin/mcp-connections", &[]).await,
         "connection" => {
             ctx.args.arg(0, "a connection id")?;

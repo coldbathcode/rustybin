@@ -978,7 +978,26 @@ impl Egress {
             .unwrap_or_default()
     }
 
-    /// The global allowlist (`egress.allow`: stored, else `RUSTYBIN_EGRESS_ALLOW`).
+    /// What `purpose` may reach, as every decision reads it: its rule, that
+    /// rule's list merged with the global allowlist, and whether it may
+    /// reach any host (never in public mode).
+    fn scope(&self, purpose: Purpose) -> (Rule, Allowlist, bool) {
+        let rule = self.rule(purpose);
+        let (global, _) = self.allowlist();
+        let merged = global.merged(&rule.allow);
+        let unrestricted = rule.any && !self.public_mode;
+        (rule, merged, unrestricted)
+    }
+
+    /// Does `purpose` permit any destination at all? `false` when it may not
+    /// reach any host and neither the global allowlist nor its own rule
+    /// names one: every call for it is then refused, whatever the URL. What
+    /// one URL would be told is [`Egress::dry_check`].
+    pub fn permits_any(&self, purpose: Purpose) -> bool {
+        let (_, merged, unrestricted) = self.scope(purpose);
+        unrestricted || !merged.is_empty()
+    }
+
     /// What the policy would say to `url` for `purpose`, without calling it:
     /// the allowlists, the loopback switch and the checks on an IP literal.
     /// A name's addresses are checked again when a call is made.
@@ -990,10 +1009,7 @@ impl Egress {
             }
         };
         let mut reasons: Vec<String> = Vec::new();
-        let rule = self.rule(purpose);
-        let (global, _) = self.allowlist();
-        let merged = global.merged(&rule.allow);
-        let unrestricted = rule.any && !self.public_mode;
+        let (rule, merged, unrestricted) = self.scope(purpose);
         let listed = merged.allows_host(&target.host, target.port)
             || target
                 .ip
@@ -1028,6 +1044,7 @@ impl Egress {
         })
     }
 
+    /// The global allowlist (`egress.allow`: stored, else `RUSTYBIN_EGRESS_ALLOW`).
     pub fn allowlist(&self) -> (Allowlist, Vec<String>) {
         Allowlist::parse(&self.settings.list("egress.allow"))
     }
@@ -1046,10 +1063,7 @@ impl Egress {
             }
         };
         let origin = target.origin();
-        let rule = self.rule(purpose);
-        let (global, _) = self.allowlist();
-        let merged = global.merged(&rule.allow);
-        let unrestricted = rule.any && !self.public_mode;
+        let (rule, merged, unrestricted) = self.scope(purpose);
         let pinned = pin_with(
             &target,
             if unrestricted { None } else { Some(&merged) },
@@ -1580,6 +1594,41 @@ mod tests {
             Some("example.org:80".into())
         );
         assert_eq!(url_entry("nope"), None);
+    }
+
+    #[test]
+    fn a_purpose_permits_something_only_when_a_host_is_named() {
+        // No default and an empty allowlist: nothing, whatever the URL.
+        let config = Config::for_tests();
+        let e = Egress::new(&config, Arc::new(Settings::new(&config)));
+        assert!(!e.permits_any(Purpose::ClientMetadata));
+        assert!(!e.permits_any(Purpose::McpRelay));
+        // A purpose with a default of its own does.
+        assert!(e.permits_any(Purpose::Registry));
+        // The loopback switch names no host.
+        let mut config = Config::for_tests();
+        config.egress_allow_loopback = true;
+        let e = Egress::new(&config, Arc::new(Settings::new(&config)));
+        assert!(!e.permits_any(Purpose::ClientMetadata));
+        // The global allowlist counts for every purpose.
+        let mut config = Config::for_tests();
+        config.egress_allow = vec!["clients.example".into()];
+        let e = Egress::new(&config, Arc::new(Settings::new(&config)));
+        assert!(e.permits_any(Purpose::ClientMetadata));
+        // A rule that reaches any host does, but never in public mode.
+        let mut config = Config::for_tests();
+        config.a2a_push_allowlist = Vec::new();
+        config.a2a_push_allow_all = true;
+        let e = Egress::new(&config, Arc::new(Settings::new(&config)));
+        assert!(e.permits_any(Purpose::A2aPush));
+        config.public_mode = true;
+        let e = Egress::new(&config, Arc::new(Settings::new(&config)));
+        assert!(!e.permits_any(Purpose::A2aPush));
+        // It agrees with what a dry check says of a URL.
+        assert_eq!(
+            e.dry_check("https://clients.example/c.json", Purpose::A2aPush)["allowed"],
+            false
+        );
     }
 
     #[tokio::test]
