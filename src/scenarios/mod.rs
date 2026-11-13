@@ -36,6 +36,7 @@ pub mod catalog;
 #[cfg(test)]
 mod tests;
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -73,6 +74,8 @@ const MAX_UPSTREAM_BODY: usize = 16 * 1024;
 /// capture before it counts the request as answered by the gateway.
 const REACHED_LOOKS: u32 = 5;
 const REACHED_SPACING: Duration = Duration::from_millis(50);
+/// The most arrivals of `timeouts` requests remembered.
+const MAX_ARRIVALS: usize = 256;
 /// The time between the trials of a `circuit_breaker` check.
 const TRIAL_SPACING: Duration = Duration::from_millis(250);
 /// The most headers of an answer a check keeps, and of each value.
@@ -186,6 +189,9 @@ impl IntoResponse for Refused {
 #[derive(Default)]
 pub struct Scenarios {
     runs: Mutex<Vec<Run>>,
+    /// The sessions of the `timeouts` runs' requests this instance has
+    /// received (the newest [`MAX_ARRIVALS`]).
+    arrivals: Mutex<VecDeque<String>>,
 }
 
 impl Scenarios {
@@ -229,6 +235,36 @@ impl Scenarios {
             .any(|r| session.starts_with(&r.session_prefix()));
         live.then(|| session.rsplit_once('-').map(|(k, _)| k.to_string()))
             .flatten()
+    }
+
+    /// A request of `session` came in (the inspector's layer says so before
+    /// the request is handled): remembered when it is a live `timeouts`
+    /// run's, whose slow upstream may never get to answer it.
+    pub fn note_arrival(&self, session: &str) {
+        if !session.starts_with("scn-") {
+            return;
+        }
+        let ours = self
+            .runs()
+            .iter()
+            .filter(|r| r.scenario.id == "timeouts")
+            .any(|r| session.starts_with(&r.session_prefix()));
+        if !ours {
+            return;
+        }
+        let mut arrivals = self.arrivals.lock().unwrap_or_else(|e| e.into_inner());
+        if arrivals.len() >= MAX_ARRIVALS {
+            arrivals.pop_front();
+        }
+        arrivals.push_back(session.to_string());
+    }
+
+    fn has_arrived(&self, session: &str) -> bool {
+        self.arrivals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|s| s == session)
     }
 
     /// What the AI mock does for a request of `session`: the profile of the
@@ -545,20 +581,65 @@ pub async fn check(
             }
         }
         "circuit_breaker" => {
-            // Until the gateway answers one on its own (nothing upstream).
+            // Until the gateway answers on its own and keeps doing so. One
+            // answer without the upstream is not an open circuit: a gateway
+            // that lost one call to the upstream answers the same. So the
+            // first such answer is followed by confirmations (one at once,
+            // the last half the half-open time later), and only when none
+            // of them reached the upstream either is the circuit open; a
+            // request that reached it again means the check goes on.
+            let window = Duration::from_millis(params.half_open_ms);
+            let looks = REACHED_SPACING * REACHED_LOOKS;
+            let confirmations = catalog::BREAKER_CONFIRMATIONS as u32;
             let mut opened_at = None;
-            for n in 0..catalog::MAX_BREAKER_REQUESTS {
+            'requests: while sent.len() < catalog::MAX_BREAKER_REQUESTS {
+                let n = sent.len();
                 let s = send_one(&client, &target, n, &session(n), Out::default()).await;
                 let answered = Instant::now();
-                let failed = s.status == 0;
+                let (status, first) = (s.status, n == 0);
                 sent.push(s);
-                if failed {
+                if status == 0 {
                     break;
                 }
-                if !reached_upstream(state, &session(n)).await {
-                    opened_at = (n > 0).then_some(answered);
+                if captured(state, &session(n)) {
+                    continue;
+                }
+                if first || !catalog::breaker_answer(status, 0) {
+                    // Nothing to confirm: the route does not reach the
+                    // upstream, or this is no open circuit's answer.
+                    if reached_upstream(state, &[session(n)]).await {
+                        continue;
+                    }
                     break;
                 }
+                let mut streak = vec![session(n)];
+                for i in 0..confirmations {
+                    let due = answered + window * i / confirmations;
+                    if Instant::now() + looks < due {
+                        // Time to look before the next: a capture that
+                        // landed late ends the wait at once.
+                        if reached_upstream(state, &streak).await {
+                            continue 'requests;
+                        }
+                        tokio::time::sleep_until(due.into()).await;
+                    }
+                    let n = sent.len();
+                    let s = send_one(&client, &target, n, &session(n), Out::default()).await;
+                    let status = s.status;
+                    sent.push(s);
+                    if status == 0 {
+                        break 'requests;
+                    }
+                    if !catalog::breaker_answer(status, 0) {
+                        continue 'requests;
+                    }
+                    streak.push(session(n));
+                }
+                if reached_upstream(state, &streak).await {
+                    continue;
+                }
+                opened_at = Some(answered);
+                break;
             }
             if let Some(at) = opened_at {
                 // The half-open time, plus a little for the gateway's clock.
@@ -573,7 +654,7 @@ pub async fn check(
                     s.trial = true;
                     let failed = s.status == 0;
                     sent.push(s);
-                    if failed || reached_upstream(state, &session(n)).await {
+                    if failed || reached_upstream(state, &[session(n)]).await {
                         break;
                     }
                 }
@@ -616,12 +697,23 @@ pub async fn check(
             send_mcp(&client, &target, sc, &params, &session, &mut sent).await;
         }
         id if id.starts_with("ai_") => {
-            send_ai(&client, &target, sc, &params, round, &session, &mut sent).await;
+            send_ai(
+                state, &client, &target, sc, &params, round, &session, &mut sent,
+            )
+            .await;
         }
         _ => {
             for n in 0..sc.requests(params.limit) {
                 sent.push(send_one(&client, &target, n, &session(n), Out::default()).await);
             }
+        }
+    }
+    if sc.id == "timeouts" {
+        // The slow upstream has no capture yet (and never will, when the
+        // gateway hangs up): what tells a timeout from a route that does
+        // not reach the upstream is that the upstream received the request.
+        for s in sent.iter_mut() {
+            s.arrived = arrived(state, &session(s.n)).await;
         }
     }
     // Upstream captures land as the upstream finishes: wait for them to
@@ -829,7 +921,9 @@ fn ai_out(prompt: String) -> Out {
 /// The requests of an AI check. Each prompt carries a word of this check
 /// (and, but for the cache check's, of the request), so no cache filled
 /// before answers it.
+#[allow(clippy::too_many_arguments)]
 async fn send_ai(
+    state: &AppState,
     client: &reqwest::Client,
     target: &str,
     sc: &Scenario,
@@ -870,10 +964,26 @@ async fn send_ai(
         _ => Vec::new(),
     };
     if !labelled.is_empty() {
-        for (n, (label, text)) in labelled.into_iter().enumerate() {
-            let mut s = send_one(client, target, n, &session(n), ai_out(text)).await;
+        for (label, text) in labelled {
+            let n = sent.len();
+            let mut s = send_one(client, target, n, &session(n), ai_out(text.clone())).await;
             s.label = Some(label);
+            let answered = s.status != 0;
             sent.push(s);
+            // A guarded prompt answered without the model is sent again: a
+            // guard refuses it again, a call that failed on the way to the
+            // model does not fail twice.
+            let again = match label {
+                LABEL_PII => LABEL_PII_AGAIN,
+                LABEL_INJECTION => LABEL_INJECTION_AGAIN,
+                _ => continue,
+            };
+            if answered && !reached_upstream(state, &[session(n)]).await {
+                let n = sent.len();
+                let mut s = send_one(client, target, n, &session(n), ai_out(text)).await;
+                s.label = Some(again);
+                sent.push(s);
+            }
         }
         return;
     }
@@ -971,11 +1081,30 @@ async fn send_one(
     s
 }
 
-/// Did a request of a check reach the upstream? Its capture may land a
-/// moment after the gateway answered: look a few times.
-async fn reached_upstream(state: &AppState, session: &str) -> bool {
+/// Has a request of a check a capture at the upstream now?
+fn captured(state: &AppState, session: &str) -> bool {
+    !state.inspector.for_session(session, 1).is_empty()
+}
+
+/// Did any of these requests of a check reach the upstream? A capture may
+/// land a moment after the gateway answered: look a few times.
+async fn reached_upstream(state: &AppState, sessions: &[String]) -> bool {
     for i in 0..REACHED_LOOKS {
-        if !state.inspector.for_session(session, 1).is_empty() {
+        if sessions.iter().any(|s| captured(state, s)) {
+            return true;
+        }
+        if i + 1 < REACHED_LOOKS {
+            tokio::time::sleep(REACHED_SPACING).await;
+        }
+    }
+    false
+}
+
+/// Did the upstream receive a request of a `timeouts` check (it may not
+/// have answered, nor ever do)? Looked for a few times, like a capture.
+async fn arrived(state: &AppState, session: &str) -> bool {
+    for i in 0..REACHED_LOOKS {
+        if state.scenarios.has_arrived(session) {
             return true;
         }
         if i + 1 < REACHED_LOOKS {

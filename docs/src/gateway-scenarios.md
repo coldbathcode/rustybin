@@ -15,23 +15,40 @@ exfiltration links, against this instance's MCP attack servers).
 | `retries` | The gateway retries a request the upstream fails with `503`, and the client sees the success | `/flaky/recover/1` (fails each request's first attempt) |
 | `rate_limiting` | The gateway answers `429` past the limit, and the requests over it never reach the upstream | a mock with `GET /items` |
 | `credential_injection` | Clients send no credential; the gateway adds the upstream's own, and the upstream accepts every request | a mock that requires `X-Upstream-Key` with a key made for the run |
-| `timeouts` | The gateway stops waiting for a slow upstream and answers a gateway error before the upstream would have | a mock whose `GET /slow` answers after 3 seconds |
+| `timeouts` | The gateway stops waiting for a slow upstream that has received the request, and answers a gateway error before the upstream would have | a mock whose `GET /slow` answers after 3 seconds |
 | `caching` | Repeated GETs come from the gateway's cache: only the first reaches the upstream | a mock whose `GET /catalog` answers `Cache-Control: public, max-age=300` |
-| `circuit_breaker` | The gateway stops forwarding to an upstream that keeps failing and answers on its own, then lets a trial request through after the half-open time | `/flaky/after/0` (answers `503` to every request) |
+| `circuit_breaker` | The gateway stops forwarding to an upstream that keeps failing and keeps answering on its own (three requests in a row, into the half-open time), then lets a trial request through after the half-open time | `/flaky/after/0` (answers `503` to every request) |
 | `request_size_limit` | The gateway refuses a body over the limit with `413` before the upstream sees it, and forwards one under it | a mock with `POST /upload` (any body) |
 | `cors` | The gateway answers a CORS preflight from an allowed origin (and not from another), and a request from the allowed origin gets `Access-Control-Allow-Origin` | a mock with `GET /cors` and `OPTIONS /cors` that answers no CORS of its own (unless you say the upstream answers CORS) |
 | `header_transformation` | The gateway adds a request header on the way to the upstream, removes one the client sent, and adds a response header on the way back | a mock with `GET /headers` |
 
-What to turn on at the gateway for the two resilience scenarios:
+What to turn on at the gateway for the resilience scenarios:
 
 - **`circuit_breaker`**: a circuit breaker on the route (often called passive health
   checks or outlier detection on the upstream) that opens after a few failed requests
-  in a row, answers on its own while open, and lets a trial request through after a
-  half-open time. The check sends requests until one is answered without reaching the
-  upstream (at most 20), waits the half-open time you give it (`half_open_ms`, 100 to
-  60000, default 10000) plus a tenth, and sends up to three trials: a pass needs one
-  of them to reach the upstream. The upstream keeps failing, so the trial fails and
-  the circuit opens again: wait for it to close before checking again.
+  in a row, answers on its own with a `5xx` while open, and lets a trial request
+  through after a half-open time. The check sends requests until one is answered
+  without reaching the upstream (at most 20), then two more to see the circuit stay
+  open: one at once, one half the half-open time later. Only when none of the three
+  reached the upstream is the circuit open. One such answer alone proves nothing,
+  because a gateway that lost one call to the upstream (a dropped connection, a
+  timeout, an overloaded machine) also answers `502` or `504` on its own: when a
+  request after it reaches the upstream again, the verdict names it as one failed
+  call and the check goes on. A `429` without the upstream is a rate limit, not an
+  open circuit. The check then waits the half-open time you give it (`half_open_ms`,
+  100 to 60000, default 10000) plus a tenth, counted from the first of the three, and
+  sends up to three trials: a pass needs one of them to reach the upstream. The
+  upstream keeps failing, so the trial fails and the circuit opens again: wait for it
+  to close before checking again.
+
+  What the check cannot tell from an open circuit: a link between the gateway and
+  the upstream that is down for more than half the half-open time and back before
+  the trial. Give the gateway's real half-open time, and read the statuses in the
+  verdict (a breaker answers the same status at once each time).
+- **`timeouts`** (no setting but the gateway's timeout): a pass needs the gateway
+  error, an answer before the upstream's, and the upstream to have received the
+  request. A route that does not reach the upstream answers `502` at once too, and
+  that is not a timeout: the verdict says the request never reached the upstream.
 - **`request_size_limit`**: a request body size limit on the route. Give the check the
   limit in bytes (`size_limit`, 16 to 1048576, default 1048576): it sends
   `POST /upload` with a body half that size, then one twice that size (so a limit set
@@ -119,8 +136,11 @@ What each check sends and how it judges:
   `123-45-6789`, card `4111 1111 1111 1111`, `jane.doe@example.com`) and, unless
   `skip_injection` is set, a prompt injection ("Ignore all previous instructions ...").
   The clean prompt must reach the model; each of the others must either be refused by
-  the gateway or reach the model without what was planted. The verdict says which
-  (refused, redacted, or the kinds that reached the model), never the values.
+  the gateway or reach the model without what was planted. A prompt answered without
+  reaching the model is sent a second time and must be answered without it again: a
+  guard refuses the same prompt twice, a call that failed between the gateway and the
+  model does not (so a check sends three to five requests). The verdict says which
+  (refused twice, redacted, or the kinds that reached the model), never the values.
 - **`ai_response_guard`**: one request whose answer from the mock is a fake customer
   record. A pass needs it to reach the model and the client's answer to hold none of
   the SSN, card number, email and phone: redacted, or the answer refused.
@@ -199,6 +219,27 @@ A verdict looks like this (a gateway without caching):
 
 When nothing reached the upstream, a hint says so: the route points elsewhere, or
 the gateway drops the `X-Rustybin-Session` header.
+
+### An answer of the gateway's own is not yet a decision
+
+Several scenarios pass on what the gateway answered without the upstream. A gateway
+that failed to reach the upstream answers on its own as well (`502`, `503`, `504`),
+so a check never takes one such answer as the feature at work:
+
+| Scenario | What tells the feature from a failed call |
+|---|---|
+| `circuit_breaker` | Three answers in a row without the upstream, the last half the half-open time after the first, each a `5xx` |
+| `timeouts` | The upstream received the request (it was still working on it when the gateway answered) |
+| `ai_prompt_guard` | The refused prompt, sent again, is refused again |
+| `rate_limiting`, `ai_token_limit`, `request_size_limit` | The status is the feature's own (`429`, `413`), which no failed call produces |
+| `cors`, `caching`, `ai_semantic_cache` | The answer is a success with the feature's content (CORS headers, a `2xx` body) |
+
+The scenarios that judge an answer after the upstream answered (`ai_response_guard`
+and the [MCP scenarios](mcp/security.md#mcp-gateway-scenarios)) accept a refusal by
+the gateway as a pass and require that the request reached the upstream; a gateway
+that failed while reading the upstream's answer and answered an error instead is not
+told from a refusal there. The verdict shows the status: a guard's refusal is the
+status you configured, not a `502` or `504`.
 
 ## Reaching the gateway
 
