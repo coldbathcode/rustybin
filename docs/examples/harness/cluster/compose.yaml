@@ -60,6 +60,11 @@ services:
       RUSTYBIN_HARNESS_EXIT: "true"
     volumes:
       - ./gateway-load.yaml:/app/scenarios/gateway-load.yaml:ro
+    # The run starts as soon as the quorum is there, and its target is the
+    # gateway: the leader starts after it, so the name resolves by then. The
+    # other nodes start first and keep trying to join until the leader is up.
+    depends_on:
+      - gateway
     ports:
       - "${HARNESS_LEADER_PORT:-18900}:80"
 
