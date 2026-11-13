@@ -317,6 +317,27 @@ fn cli_docs() {
     }
 }
 
+/// mdBook warns about (and a browser swallows) a placeholder such as
+/// `<VAR>` written as prose: outside code, the reference escapes every `<`.
+#[test]
+fn the_reference_has_no_bare_html_tag() {
+    let mut fenced = false;
+    for line in reference_markdown().lines() {
+        if line.starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let prose = line.split('`').step_by(2).collect::<Vec<_>>().join(" ");
+        let bare = prose
+            .char_indices()
+            .any(|(i, c)| c == '<' && !prose[..i].ends_with('\\'));
+        assert!(!bare, "a bare < in the CLI reference: {line}");
+    }
+}
+
 // ── Against an instance ─────────────────────────────────────────────
 
 /// The longest one command line may take against the test instance.

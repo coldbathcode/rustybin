@@ -612,6 +612,23 @@ pub fn command_help(cmd: &Cmd) -> String {
     s
 }
 
+/// Help text as Markdown prose: a `<` outside a code span is escaped, so a
+/// placeholder such as `RUSTYBIN_TEST_<VAR>` is text, not an HTML tag the
+/// page never closes.
+fn md_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut code = false;
+    for c in text.chars() {
+        match c {
+            '`' => code = !code,
+            '<' if !code => out.push('\\'),
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The reference the book carries (`docs/src/cli.md`), generated from the
 /// command tree.
 pub fn reference_markdown() -> String {
@@ -628,11 +645,12 @@ pub fn reference_markdown() -> String {
          declare it).\n\n| Flag | Meaning |\n|---|---|\n",
     );
     for f in GLOBAL_FLAGS {
-        s.push_str(&format!("| `{}` | {} |\n", f.name, f.help));
+        s.push_str(&format!("| `{}` | {} |\n", f.name, md_text(f.help)));
     }
     for (noun, summary) in NOUNS {
         s.push_str(&format!(
-            "\n## {noun}\n\n{summary}\n\n| Command | What it does | Calls | Needs |\n|---|---|---|---|\n"
+            "\n## {noun}\n\n{}\n\n| Command | What it does | Calls | Needs |\n|---|---|---|---|\n",
+            md_text(summary)
         ));
         for c in COMMANDS.iter().filter(|c| c.noun == *noun) {
             let routes = c
@@ -656,7 +674,7 @@ pub fn reference_markdown() -> String {
             s.push_str(&format!(
                 "| `rustybin {}` | {}{} | {} | {} |\n",
                 c.line().replace('|', "\\|"),
-                c.summary.replace('|', "\\|"),
+                md_text(c.summary).replace('|', "\\|"),
                 flags.replace('|', "\\|"),
                 routes,
                 needs_of(c)
