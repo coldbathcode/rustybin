@@ -109,8 +109,9 @@ async def admin() -> None:
         section("prompts")
         prompts = {p.name for p in (await c.list_prompts()).prompts}
         check(prompts == {"build_instance", "mock_an_api", "publish_portal", "backup_to_git", "test_mcp_server",
-                          "onboard_agent", "debug_gateway_call", "secure_a_mock", "load_test_gateway"},
-              f"nine prompts {prompts}")
+                          "onboard_agent", "debug_gateway_call", "secure_a_mock", "load_test_gateway",
+                          "rehearse_demo", "prepare_customer_demo"},
+              f"eleven prompts {prompts}")
         p = await c.get_prompt("secure_a_mock", {"name": "petstore", "mode": "jwt"})
         check("issue_token" in p.messages[0].content.text, "secure_a_mock mentions issue_token")
         p = await c.get_prompt("build_instance", {"brief": "an orders API for the checkout team"})
