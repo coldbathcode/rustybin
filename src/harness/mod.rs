@@ -1684,12 +1684,19 @@ pub fn catalog() -> Vec<Endpoint> {
              left out and the variable named in `variables`, and an Artillery script's phases \
              become `pattern` when they map exactly. `?format=` (har, captures, postman, \
              artillery, arazzo) names the format instead of reading it from the document. The \
-             body may also be a JSON envelope `{document, format, variables}`: `document` is the \
-             document or its text, and `variables` gives values for variables the document does \
-             not define (at most 64, 1 KiB each; a given value wins over the document's own; a \
-             harness placeholder's name or one that looks like a credential is refused; \
-             credentials are removed after the values are put in). A program in a scripting \
-             language is refused. Sends nothing. Works with harness mode off.",
+             body may also be a JSON envelope `{document, format, variables, environment}`: \
+             `document` is the document or its text, and `variables` gives values for variables \
+             the document does not define (at most 64, 1 KiB each; a given value wins over the \
+             document's own; a name that looks like a credential is refused; credentials are \
+             removed after the values are put in). A variable named like a harness placeholder \
+             (`id`, `seq`, `vu`, `run`, `node`, `layer`, `rand`, `ip`) may be given: its value is \
+             put in at import time, and `notes` names it, since the requests then carry a \
+             constant where the harness would generate a value. `environment` is a Postman \
+             environment or globals export (the document or its text, at most 256 KiB) read as \
+             more variables: a given variable wins over its entry, a disabled entry is passed \
+             over, and an entry marked `secret`, named like a credential or without a usable \
+             value is not taken and is named in `notes`, never its value. A program in a \
+             scripting language is refused. Sends nothing. Works with harness mode off.",
         )
         .example(
             Example::post("Import", "/_rustybin/harness/import").json(
@@ -2263,7 +2270,7 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
             "post": {
                 "tags": tag,
                 "summary": "A recording, a collection or a script as a scenario's source",
-                "description": "A HAR file, the answer of GET /_rustybin/requests, a Postman collection (v2.1) or an Artillery script (YAML or JSON), as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. What a collection or a script says that has no counterpart (scripts, hooks, plugins, captures, think times) is never run: it is named in `left_out`. A request with a variable the document does not define is left out and the variable named in `variables`. An Artillery script's phases become `pattern` when they map exactly. The body is the document, or an envelope `{document, format, variables}` that gives values for the document's variables: a given value wins over the document's own, a harness placeholder's name (`seq`, `vu`, `run`, `node`, `layer`, `rand`, `id`, `ip`) or one that looks like a credential is refused, and credentials are removed after the values are put in. A recording has no variables. Sends nothing.",
+                "description": "A HAR file, the answer of GET /_rustybin/requests, a Postman collection (v2.1) or an Artillery script (YAML or JSON), as weighted request templates. Secret-looking headers and query parameters are removed and named; entries with a secret-looking field in the body are left out. What a collection or a script says that has no counterpart (scripts, hooks, plugins, captures, think times) is never run: it is named in `left_out`. A request with a variable the document does not define is left out and the variable named in `variables`. An Artillery script's phases become `pattern` when they map exactly. The body is the document, or an envelope `{document, format, variables, environment}` that gives values for the document's variables: a given value wins over the document's own, a name that looks like a credential is refused, and credentials are removed after the values are put in. A variable named like a harness placeholder (`seq`, `vu`, `run`, `node`, `layer`, `rand`, `id`, `ip`) may be given: its value is put in at import time and `notes` names it, since the imported requests then carry a constant where the harness would generate a value. `environment` is a Postman environment or globals export read as more variables: a given variable wins over its entry, a disabled entry is passed over, and an entry marked `secret`, named like a credential or without a usable value is not taken and is named in `notes`, never its value; the 64 count what is taken with what is given. A recording has no variables. Sends nothing.",
                 "operationId": "importHarnessRecording",
                 "parameters": [{
                     "name": "format", "in": "query", "required": false,
@@ -2276,12 +2283,21 @@ fn live_openapi_paths(paths: &mut Value, tag: &Value, off: &Value, scenario_body
                         { "type": "object", "description": "An envelope: the document with values for its variables.", "required": ["document"], "additionalProperties": false, "properties": {
                             "document": { "description": "The document, or its text (JSON or YAML).", "oneOf": [{ "type": "object" }, { "type": "array" }, { "type": "string" }] },
                             "format": { "type": "string", "enum": ["har", "captures", "postman", "artillery", "arazzo"], "description": "The format, instead of reading it from the document or the query." },
-                            "variables": { "type": "object", "maxProperties": 64, "additionalProperties": { "oneOf": [{ "type": "string", "maxLength": 1024 }, { "type": "number" }, { "type": "boolean" }] }, "description": "Values for variables of the document, by name as the document writes it (`baseUrl` for `{{baseUrl}}`, `:id` for a Postman path variable, an Arazzo workflow input as `variables` names it)." }
+                            "variables": { "type": "object", "maxProperties": 64, "additionalProperties": { "oneOf": [{ "type": "string", "maxLength": 1024 }, { "type": "number" }, { "type": "boolean" }] }, "description": "Values for variables of the document, by name as the document writes it (`baseUrl` for `{{baseUrl}}`, `:id` for a Postman path variable, an Arazzo workflow input as `variables` names it). A harness placeholder's name (`id`, `seq`) may be given and is then a constant in the imported requests, which `notes` says." },
+                            "environment": { "description": "A Postman environment or globals export read as more variables, or its text (at most 256 KiB, 1000 entries). `variables` win over its entries.", "oneOf": [
+                                { "type": "string", "maxLength": 262144 },
+                                { "type": "object", "required": ["values"], "properties": { "values": { "type": "array", "maxItems": 1000, "items": { "type": "object", "required": ["key"], "properties": {
+                                    "key": { "type": "string", "description": "The variable's name." },
+                                    "value": { "description": "Its value: text, a number, true or false." },
+                                    "enabled": { "type": "boolean", "description": "`false`: the entry is passed over." },
+                                    "type": { "type": "string", "description": "`secret`: the entry is never taken, and is named in `notes`." }
+                                } } } } }
+                            ] }
                         } }
                     ] } },
                     "application/yaml": { "schema": { "type": "string", "description": "An Artillery script." } }
                 } },
-                "responses": { "200": json_ok("`format`, `source.requests`, `entries`, `skipped`, `removed`, `hosts`, `left_out`, `variables` (the ones that still have no value), `notes`, and `pattern` and `timeout` when an Artillery script gives them"), "400": { "description": "Not a document this import reads (a program is refused), nothing to import, or a variable that is refused (named, its value never shown)" } }
+                "responses": { "200": json_ok("`format`, `source.requests`, `entries`, `skipped`, `removed`, `hosts`, `left_out`, `variables` (the ones that still have no value), `notes`, and `pattern` and `timeout` when an Artillery script gives them"), "400": { "description": "Not a document this import reads (a program is refused), nothing to import, a variable that is refused (named, its value never shown), or an environment that is not one (nothing of it is quoted)" } }
             }
         }));
         all.insert("/_rustybin/harness/preview".into(), json!({

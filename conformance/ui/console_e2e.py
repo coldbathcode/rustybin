@@ -3411,14 +3411,69 @@ def import_recording(page):
     expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/v1/users/7/orders/o-42"))
     expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/v1/users/7['\"]?\n"))
     assert "authorization" not in page.locator("#harness-yaml").input_value().lower()
-    # A placeholder of the harness is refused by name; the form stays.
+    # A name that looks like a credential is refused by name; the form stays.
     page.click("#harness-import-var-add")
     form = page.locator("#harness-import-vars")
-    form.get_by_label("Variable name").last.fill("seq")
+    form.get_by_label("Variable name").last.fill("apiKey")
     form.get_by_label("Variable value").last.fill("1")
     page.click("#harness-import-again")
-    expect(page.locator("#harness-imported")).to_contain_text("variables.seq")
+    expect(page.locator("#harness-imported")).to_contain_text("variables.apiKey")
     expect(page.locator("#harness-import-vars")).to_be_visible()
+    # A collection that writes {{id}}, a name the harness has a placeholder
+    # for: the form offers a field for it, and the answer says the requests
+    # carry a fixed value.
+    by_id = {
+        "info": {"name": "Items", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+        "item": [
+            {"name": "One", "request": {"method": "GET",
+                "url": {"raw": "{{baseUrl}}/items/{{id}}", "host": ["{{baseUrl}}"], "path": ["items", "{{id}}"]}}},
+            {"name": "Its parts", "request": {"method": "GET",
+                "url": {"raw": "{{baseUrl}}/items/{{id}}/parts/{{part}}", "host": ["{{baseUrl}}"],
+                        "path": ["items", "{{id}}", "parts", "{{part}}"]}}},
+        ],
+    }
+    page.set_input_files("#harness-import", files=[{
+        "name": "items.postman_collection.json", "mimeType": "application/json",
+        "buffer": json.dumps(by_id).encode(),
+    }])
+    form = page.locator("#harness-import-vars")
+    expect(form).to_be_visible()
+    expect(form.get_by_label("Value of id")).to_be_visible()
+    # The collection's environment file fills the fields the form lists;
+    # a secret entry and a disabled one never reach a field.
+    environment = {
+        "name": "Staging",
+        "values": [
+            {"key": "baseUrl", "value": "https://api.example.com/v3", "type": "default", "enabled": True},
+            {"key": "id", "value": "41", "type": "default", "enabled": True},
+            {"key": "part", "value": "s3cr3t-part", "type": "secret", "enabled": True},
+            {"key": "part", "value": "old-part", "type": "default", "enabled": False},
+        ],
+        "_postman_variable_scope": "environment",
+    }
+    page.set_input_files("#harness-import-env", files=[{
+        "name": "not-one.json", "mimeType": "application/json", "buffer": b'{"info": {}}',
+    }])
+    page.locator(".toast", has_text="Not a Postman environment").wait_for()
+    page.set_input_files("#harness-import-env", files=[{
+        "name": "staging.postman_environment.json", "mimeType": "application/json",
+        "buffer": json.dumps(environment).encode(),
+    }])
+    expect(form.get_by_label("Value of id")).to_have_value("41")
+    expect(form.get_by_label("Value of part")).to_have_value("")
+    expect(page.locator("#harness-import-env-said")).to_contain_text("Staging: 2 value(s) read")
+    page.click("#harness-import-again")
+    # The base URL came from the file with the import; the part is still
+    # asked for, and the secret entry is named, never shown.
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/v3/items/41['\"]?\n"))
+    imported = page.locator("#harness-imported")
+    expect(imported).to_contain_text("a harness placeholder name was given a fixed value: id")
+    expect(imported).to_contain_text("marked secret (a credential is never taken): part")
+    assert "s3cr3t-part" not in page.content()
+    form = page.locator("#harness-import-vars")
+    form.get_by_label("Value of part").fill("p-9")
+    page.click("#harness-import-again")
+    expect(page.locator("#harness-yaml")).to_have_value(re.compile(r"/v3/items/41/parts/p-9"))
 
 
 def spec_fetch_refused(page):

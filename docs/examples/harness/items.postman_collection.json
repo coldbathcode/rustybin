@@ -1,0 +1,58 @@
+{
+  "info": {
+    "name": "Items",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "One item",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{session}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/items/{{id}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "items",
+            "{{id}}"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Its parts",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/items/{{id}}/parts?region={{region}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "items",
+            "{{id}}",
+            "parts"
+          ],
+          "query": [
+            {
+              "key": "region",
+              "value": "{{region}}"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

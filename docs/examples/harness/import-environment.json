@@ -1,0 +1,97 @@
+{
+  "document": {
+    "info": {
+      "name": "Items",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+      {
+        "name": "One item",
+        "request": {
+          "method": "GET",
+          "header": [
+            {
+              "key": "Accept",
+              "value": "application/json"
+            },
+            {
+              "key": "Authorization",
+              "value": "Bearer {{session}}"
+            }
+          ],
+          "url": {
+            "raw": "{{baseUrl}}/items/{{id}}",
+            "host": [
+              "{{baseUrl}}"
+            ],
+            "path": [
+              "items",
+              "{{id}}"
+            ]
+          }
+        }
+      },
+      {
+        "name": "Its parts",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "{{baseUrl}}/items/{{id}}/parts?region={{region}}",
+            "host": [
+              "{{baseUrl}}"
+            ],
+            "path": [
+              "items",
+              "{{id}}",
+              "parts"
+            ],
+            "query": [
+              {
+                "key": "region",
+                "value": "{{region}}"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "environment": {
+    "id": "5f0c2a52-7d0e-4c55-9a53-2f1f6f0f6a11",
+    "name": "Staging",
+    "values": [
+      {
+        "key": "baseUrl",
+        "value": "https://api.example.com/shop",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "id",
+        "value": "41",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "region",
+        "value": "eu",
+        "type": "default",
+        "enabled": true
+      },
+      {
+        "key": "region",
+        "value": "us",
+        "type": "default",
+        "enabled": false
+      },
+      {
+        "key": "session",
+        "value": "kept-out-of-the-import",
+        "type": "secret",
+        "enabled": true
+      }
+    ],
+    "_postman_variable_scope": "environment"
+  }
+}

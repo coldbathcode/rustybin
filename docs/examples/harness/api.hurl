@@ -515,15 +515,75 @@ jsonpath "$.variables" count == 1
 jsonpath "$.variables[0]" == "invoiceId"
 # ANCHOR_END: harness_import_variables
 
-# A placeholder of the harness is never a variable: refused by name.
+# ANCHOR: harness_import_environment
+# The collection with its Postman environment file instead of each value.
+# The entry marked secret is never taken (the header it stood in is removed
+# anyway), the disabled one is passed over, and the collection's {{id}}, a
+# name the harness has a placeholder for, is the constant the file gives:
+# notes says both, by name.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+file,import-environment.json;
+HTTP 200
+[Asserts]
+jsonpath "$.format" == "postman"
+jsonpath "$.source.requests" count == 2
+jsonpath "$.source.requests[*].path" includes "/shop/items/41"
+jsonpath "$.source.requests[*].path" includes "/shop/items/41/parts?region=eu"
+jsonpath "$.hosts[0]" == "api.example.com"
+jsonpath "$.removed[0]" == "authorization"
+jsonpath "$.variables" count == 0
+jsonpath "$.notes" count == 2
+jsonpath "$.notes[0]" == "environment: not taken, marked secret (a credential is never taken): session"
+jsonpath "$.notes[1]" startsWith "variables: a harness placeholder name was given a fixed value: id."
+body not contains "kept-out-of-the-import"
+# ANCHOR_END: harness_import_environment
+
+# A variable given beside the environment wins over its entry.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+{"document": {"info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "item": [{"name": "a", "request": {"method": "GET", "url": {"raw": "https://api.example.com/items/:item",
+   "protocol": "https", "host": ["api", "example", "com"], "path": ["items", ":item"]}}}]},
+ "variables": {":item": 8},
+ "environment": {"values": [{"key": ":item", "value": "41", "enabled": true}]}}
+HTTP 200
+[Asserts]
+jsonpath "$.source.requests[0].path" == "/items/8"
+
+# Without a value the collection's {{id}} is never left for the harness to
+# read as its own placeholder: the request is left out and the name asked for.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+file,items.postman_collection.json;
+HTTP 400
+[Asserts]
+jsonpath "$.error" contains "nothing to import"
+jsonpath "$.variables[0]" == "id"
+jsonpath "$.variables[1]" == "region"
+
+# An environment that is not one is refused, and nothing of it is quoted.
+POST {{harness_url}}/_rustybin/harness/import
+Authorization: Bearer {{admin_token}}
+{"document": {"info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+  "item": [{"name": "a", "request": {"method": "GET", "url": "https://api.example.com/items/1"}}]},
+ "environment": {"values": "not-a-list-of-entries"}}
+HTTP 400
+[Asserts]
+jsonpath "$.error" startsWith "environment: a Postman environment or globals export"
+jsonpath "$.error" not contains "not-a-list-of-entries"
+
+# A name that looks like a credential is never a variable: refused by name.
 POST {{harness_url}}/_rustybin/harness/import
 Authorization: Bearer {{admin_token}}
 {"document": {"info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
   "item": [{"name": "a", "request": {"method": "GET", "url": "https://api.example.com/orders/:order"}}]},
- "variables": {"seq": "1"}}
+ "variables": {"apiKey": "1"}}
 HTTP 400
 [Asserts]
-jsonpath "$.error" startsWith "variables.seq:"
+jsonpath "$.error" startsWith "variables.apiKey:"
 
 # Nothing imports for want of a variable: the refusal carries its name.
 POST {{harness_url}}/_rustybin/harness/import

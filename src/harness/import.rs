@@ -19,12 +19,18 @@
 //! document does not define leaves its request out and is named in
 //! `variables`. A program in a scripting language is refused.
 //!
-//! The caller may give values for variables ([`Variables`]): collections
-//! keep their base URL and ids in an environment the document does not
-//! carry. A given value is put in where the document's own would be, and
-//! nothing else about the import changes: credentials are removed after
-//! it, and what comes out is validated like any other source (`fits`).
-//! A value is never in an error, a note or `left_out`, only its name.
+//! The caller may give values for variables ([`Variables`]), one by one or
+//! as a Postman environment file: collections keep their base URL and ids
+//! in an environment the document does not carry. A given value is put in
+//! where the document's own would be, and nothing else about the import
+//! changes: credentials are removed after it, and what comes out is
+//! validated like any other source (`fits`). A value is never in an
+//! error, a note or `left_out`, only its name.
+//!
+//! A variable named like a harness placeholder (`{{id}}`, `{{seq}}`) is
+//! the document's variable, never the harness's: without a value its
+//! request is left out like any other, and with one (the document's own,
+//! or the caller's, which a note then names) the value is put in.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -59,6 +65,10 @@ pub const MAX_VARIABLE_BYTES: usize = 1024;
 /// The longest name of a given variable (a name in `variables` is cut here
 /// too).
 pub const MAX_VARIABLE_NAME: usize = 64;
+/// The largest Postman environment file handed over as the variables.
+pub const MAX_ENVIRONMENT_BYTES: usize = 256 * 1024;
+/// Entries of an environment file read, at most.
+pub const MAX_ENVIRONMENT_ENTRIES: usize = 1000;
 
 /// Never replayed: set by the client, or wrong for another target.
 const DROPPED_HEADERS: &[&str] = &[
@@ -265,26 +275,76 @@ fn from_capture(c: &Value) -> Read {
 
 /// Values the caller gives for variables of the document, by name in the
 /// document's own syntax (`baseUrl` for `{{baseUrl}}`, `:id` for a Postman
-/// path variable). Checked when made, so one that exists is within the
-/// caps, is no harness placeholder and has no name that looks like a
-/// credential. `Debug` shows the names only.
+/// path variable), typed one by one or handed over as a Postman environment
+/// file. Checked when made, so one that exists is within the caps and has
+/// no name that looks like a credential. `Debug` shows the names only.
+///
+/// A name of a harness placeholder (`scenario::PLACEHOLDERS`) may be given:
+/// the value is put in at import time, and a note says, by name, that the
+/// requests carry a constant where the harness would generate a value.
 #[derive(Clone, Default)]
-pub struct Variables(BTreeMap<String, String>);
+pub struct Variables {
+    values: BTreeMap<String, String>,
+    /// The names that came from an environment file and were not given
+    /// one by one as well: one the document never uses is no typo.
+    from_environment: BTreeSet<String>,
+    /// An environment was handed over, whatever was taken from it.
+    environment: bool,
+    /// What was not taken from the environment, by name.
+    notes: Vec<String>,
+}
 
 impl std::fmt::Debug for Variables {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_set().entries(self.0.keys()).finish()
+        f.debug_set().entries(self.values.keys()).finish()
     }
 }
 
+/// Why a name and its value are not a variable an import takes. Never
+/// holds the value.
+enum Unfit {
+    Name,
+    Credential,
+    NotScalar,
+    TooLong,
+    Braces,
+}
+
+/// One given variable, checked: its name as the document writes it and its
+/// value as text. The same for a variable typed and for an entry of an
+/// environment file.
+fn check_variable(name: &str, value: &Value) -> Result<(String, String), Unfit> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.chars().count() > MAX_VARIABLE_NAME
+        || name.contains("{{")
+        || name.contains("}}")
+        || name.chars().any(char::is_control)
+    {
+        return Err(Unfit::Name);
+    }
+    if looks_secret(name) {
+        return Err(Unfit::Credential);
+    }
+    let text = scalar(value).ok_or(Unfit::NotScalar)?;
+    if text.len() > MAX_VARIABLE_BYTES {
+        return Err(Unfit::TooLong);
+    }
+    if text.contains("{{") {
+        return Err(Unfit::Braces);
+    }
+    Ok((name.to_string(), text))
+}
+
 impl Variables {
+    /// Nothing given, and no environment handed over.
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.values.is_empty() && !self.environment
     }
 
     /// The names given.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.0.keys().map(String::as_str)
+        self.values.keys().map(String::as_str)
     }
 
     /// A JSON object of name to value (text, a number, true or false). A
@@ -298,49 +358,186 @@ impl Variables {
         if map.len() > MAX_VARIABLES {
             return Err(format!("variables: at most {MAX_VARIABLES}"));
         }
-        let mut out = BTreeMap::new();
+        let mut values = BTreeMap::new();
         for (name, value) in map {
-            let name = name.trim();
-            if name.is_empty()
-                || name.chars().count() > MAX_VARIABLE_NAME
-                || name.contains("{{")
-                || name.contains("}}")
-                || name.chars().any(char::is_control)
-            {
-                return Err(format!(
+            let shown = name.trim();
+            let (name, text) = check_variable(name, value).map_err(|unfit| match unfit {
+                Unfit::Name => format!(
                     "variables: a name is 1 to {MAX_VARIABLE_NAME} characters as the document writes it, without the braces"
-                ));
+                ),
+                Unfit::Credential => format!(
+                    "variables.{shown}: a name that looks like a credential is not taken: an import removes credentials, give the scenario an identity instead"
+                ),
+                Unfit::NotScalar => {
+                    format!("variables.{shown}: a value is text, a number, true or false")
+                }
+                Unfit::TooLong => {
+                    format!("variables.{shown}: a value is at most {MAX_VARIABLE_BYTES} bytes")
+                }
+                Unfit::Braces => format!(
+                    "variables.{shown}: a value does not hold {{{{, which would read as another variable or a placeholder"
+                ),
+            })?;
+            values.insert(name, text);
+        }
+        Ok(Self {
+            values,
+            ..Self::default()
+        })
+    }
+
+    /// [`Variables::from_value`] with a Postman environment (or globals)
+    /// export beside it: the document `{"values": [{"key", "value",
+    /// "enabled", "type"}]}` or its text. A variable given one by one wins
+    /// over the environment's.
+    ///
+    /// Every entry meets the checks a given variable meets. An environment
+    /// is a file of somebody's whole setup, so an entry that fails one is
+    /// not taken and is named in a note (never its value) where a typed
+    /// variable would be refused: one marked `secret` (a credential), one
+    /// whose name looks like a credential, one without a value, one whose
+    /// value is no variable's. A disabled entry is passed over. The cap on
+    /// the number of variables counts what is taken with what is given.
+    ///
+    /// A refusal quotes nothing of the environment.
+    pub fn with_environment(variables: &Value, environment: &Value) -> Result<Self, String> {
+        const SHAPE: &str = "environment: a Postman environment or globals export (an object with a values list), or its text";
+        let mut out = Self::from_value(variables)?;
+        let parsed;
+        let doc = match environment {
+            Value::Null => return Ok(out),
+            Value::String(text) => {
+                // Bounded before it is parsed.
+                if text.len() > MAX_ENVIRONMENT_BYTES {
+                    return Err(format!(
+                        "environment: at most {} KiB",
+                        MAX_ENVIRONMENT_BYTES / 1024
+                    ));
+                }
+                parsed = serde_json::from_str::<Value>(text).map_err(|_| SHAPE.to_string())?;
+                &parsed
             }
-            if super::scenario::PLACEHOLDERS.contains(&name) {
+            other => other,
+        };
+        let entries = doc
+            .as_object()
+            .and_then(|o| o.get("values"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| SHAPE.to_string())?;
+        if entries.len() > MAX_ENVIRONMENT_ENTRIES {
+            return Err(format!(
+                "environment: at most {MAX_ENVIRONMENT_ENTRIES} entries"
+            ));
+        }
+        out.environment = true;
+        let mut taken: BTreeMap<String, String> = BTreeMap::new();
+        let (mut secret, mut credential, mut empty, mut unfit) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut unnamed = 0usize;
+        for (i, entry) in entries.iter().enumerate() {
+            let Some(key) = entry
+                .as_object()
+                .and_then(|e| e.get("key"))
+                .and_then(Value::as_str)
+            else {
                 return Err(format!(
-                    "variables.{name}: {{{{{name}}}}} is a placeholder of the harness ({}), which an import never gives a value",
-                    super::scenario::PLACEHOLDERS.join(", ")
-                ));
-            }
-            if looks_secret(name) {
-                return Err(format!(
-                    "variables.{name}: a name that looks like a credential is not taken: an import removes credentials, give the scenario an identity instead"
-                ));
-            }
-            let Some(text) = scalar(value) else {
-                return Err(format!(
-                    "variables.{name}: a value is text, a number, true or false"
+                    "environment.values[{i}]: an entry is an object with a key and a value"
                 ));
             };
-            if text.len() > MAX_VARIABLE_BYTES {
-                return Err(format!(
-                    "variables.{name}: a value is at most {MAX_VARIABLE_BYTES} bytes"
-                ));
+            if entry["enabled"] == json!(false) || entry["disabled"] == json!(true) {
+                continue;
             }
-            if text.contains("{{") {
-                return Err(format!(
-                    "variables.{name}: a value does not hold {{{{, which would read as another variable or a placeholder"
-                ));
+            // The name first, with a value that passes: an entry is named
+            // in a note only when its name is one a variable could have.
+            let marked_secret = entry["type"] == json!("secret");
+            let name = match check_variable(key, &Value::Bool(true)) {
+                Ok((name, _)) => name,
+                Err(Unfit::Credential) => {
+                    let shown = key.trim().to_string();
+                    taken.remove(&shown);
+                    let list = if marked_secret {
+                        &mut secret
+                    } else {
+                        &mut credential
+                    };
+                    name_once(list, shown);
+                    continue;
+                }
+                Err(_) => {
+                    unnamed += 1;
+                    continue;
+                }
+            };
+            // A later entry of the same name stands for the earlier one.
+            taken.remove(&name);
+            if marked_secret {
+                name_once(&mut secret, name);
+                continue;
             }
-            out.insert(name.to_string(), text);
+            let value = &entry["value"];
+            if value.is_null() || value.as_str() == Some("") {
+                name_once(&mut empty, name);
+                continue;
+            }
+            match check_variable(key, value) {
+                Ok((name, text)) => {
+                    taken.insert(name, text);
+                }
+                Err(_) => name_once(&mut unfit, name),
+            }
         }
-        Ok(Self(out))
+        for (name, text) in taken {
+            if out.values.contains_key(&name) {
+                continue;
+            }
+            if out.values.len() >= MAX_VARIABLES {
+                return Err(format!(
+                    "variables: at most {MAX_VARIABLES}, the environment's included: disable the entries the document does not use"
+                ));
+            }
+            out.from_environment.insert(name.clone());
+            out.values.insert(name, text);
+        }
+        let unfit_why = format!(
+            "a value that is not text, a number, true or false of at most {MAX_VARIABLE_BYTES} bytes without {{{{"
+        );
+        for (names, why) in [
+            (secret, "marked secret (a credential is never taken)"),
+            (
+                credential,
+                "a name that looks like a credential (an import removes credentials)",
+            ),
+            (empty, "no value"),
+            (unfit, unfit_why.as_str()),
+        ] {
+            if !names.is_empty() {
+                out.notes.push(format!(
+                    "environment: not taken, {why}: {}",
+                    names.join(", ")
+                ));
+            }
+        }
+        if unnamed > 0 {
+            out.notes.push(format!(
+                "environment: not taken, a name that is not a variable's: {unnamed} entries"
+            ));
+        }
+        Ok(out)
     }
+}
+
+/// The note that says which harness placeholder names carry a given value.
+/// Names only.
+fn fixed_placeholders<'a>(used: impl Iterator<Item = &'a str>) -> Option<String> {
+    let fixed: Vec<&str> = used
+        .filter(|name| super::scenario::PLACEHOLDERS.contains(name))
+        .collect();
+    (!fixed.is_empty()).then(|| {
+        format!(
+            "variables: a harness placeholder name was given a fixed value: {}. The imported requests carry that constant where the harness would generate a value for each request",
+            fixed.join(", ")
+        )
+    })
 }
 
 /// The variables a document defines with one plain value or the caller
@@ -349,6 +546,8 @@ impl Variables {
 struct Vars {
     /// The caller's: they win over the document's.
     given: BTreeMap<String, String>,
+    /// The given ones that came from an environment file.
+    from_environment: BTreeSet<String>,
     defined: BTreeMap<String, String>,
     missing: Vec<String>,
     /// The given ones the document used.
@@ -364,7 +563,8 @@ const UNRESOLVED: &str = "an unresolved variable";
 impl Vars {
     fn with(given: &Variables) -> Self {
         Self {
-            given: given.0.clone(),
+            given: given.values.clone(),
+            from_environment: given.from_environment.clone(),
             ..Self::default()
         }
     }
@@ -414,13 +614,17 @@ impl Vars {
         self.resolve(text).unwrap_or_default()
     }
 
-    /// Say which given variables the document never used (names only), and
-    /// hand over the names that have no value.
+    /// Say which given variables the document never used and which
+    /// placeholder names carry a given value (names only), and hand over
+    /// the names that have no value. An environment's entry the document
+    /// never uses is not said: the file is a whole setup, not a typo.
     fn finish(self, out: &mut Imported) {
+        out.notes
+            .extend(fixed_placeholders(self.used.iter().map(String::as_str)));
         let unused: Vec<&str> = self
             .given
             .keys()
-            .filter(|name| !self.used.contains(*name))
+            .filter(|name| !self.used.contains(*name) && !self.from_environment.contains(*name))
             .map(String::as_str)
             .collect();
         if !unused.is_empty() {
@@ -1627,7 +1831,7 @@ fn read_arazzo(
     // A given input put in; any other reference stays as it is written.
     let fill = |text: &str| -> String {
         crate::replay::run::fill(text, &|name| {
-            Some(match given.0.get(name) {
+            Some(match given.values.get(name) {
                 Some(value) => {
                     used.borrow_mut().insert(name.to_string());
                     value.clone()
@@ -1641,7 +1845,7 @@ fn read_arazzo(
     for t in &imported.tests {
         for step in &t.steps {
             let mut r = step.request.clone();
-            if !given.is_empty() {
+            if !given.values.is_empty() {
                 r.path = fill(&r.path);
                 for (name, value) in r.headers.iter_mut() {
                     // A secret-looking header is removed by name later,
@@ -1698,7 +1902,12 @@ fn read_arazzo(
         }
     }
     let used = used.into_inner();
-    let unused: Vec<&str> = given.names().filter(|n| !used.contains(*n)).collect();
+    out.notes
+        .extend(fixed_placeholders(used.iter().map(String::as_str)));
+    let unused: Vec<&str> = given
+        .names()
+        .filter(|n| !used.contains(*n) && !given.from_environment.contains(*n))
+        .collect();
     if !unused.is_empty() {
         out.notes.push(format!(
             "variables: given and not used by the document: {}",
@@ -1751,13 +1960,20 @@ fn import_doc(
     };
     if format.recording() && !given.is_empty() {
         return Err(format!(
-            "variables: a recording ({}) has no variables",
+            "{}: a recording ({}) has no variables",
+            if given.values.is_empty() {
+                "environment"
+            } else {
+                "variables"
+            },
             format.as_str()
         )
         .into());
     }
     let mut out = Imported {
         format,
+        // What an environment file held that was not taken, by name.
+        notes: given.notes.clone(),
         ..Imported::default()
     };
     let mut phases: Phases = None;
@@ -1988,7 +2204,7 @@ fn import_text_doc(
 }
 
 /// The keys of an import's envelope.
-const ENVELOPE_KEYS: &[&str] = &["document", "format", "variables"];
+const ENVELOPE_KEYS: &[&str] = &["document", "format", "variables", "environment"];
 
 /// A format by its name, or the refusal that lists them.
 pub fn format_named(name: Option<&str>) -> Result<Option<Format>, String> {
@@ -2002,8 +2218,9 @@ pub fn format_named(name: Option<&str>) -> Result<Option<Format>, String> {
 
 /// Turn the body of an import request into request templates: the document
 /// bare ([`import_text_given`]), or a JSON envelope `{document, format,
-/// variables}` whose `document` is the document's text or the document
-/// itself. `format` is the one the request names beside the body; the
+/// variables, environment}` whose `document` is the document's text or the
+/// document itself and whose `environment` is a Postman environment file
+/// read as more variables ([`Variables::with_environment`]). `format` is the one the request names beside the body; the
 /// envelope's own wins. A refusal says which variables had no value.
 pub fn import_body(
     body: &str,
@@ -2031,14 +2248,20 @@ pub fn import_body(
         .find(|k| !ENVELOPE_KEYS.contains(&k.as_str()))
     {
         let shown: String = other.chars().take(64).collect();
-        return Err(format!("{shown}: an import takes document, format and variables").into());
+        return Err(format!(
+            "{shown}: an import takes document, format, variables and environment"
+        )
+        .into());
     }
     let format = match envelope.get("format") {
         None | Some(Value::Null) => format_named(format)?,
         Some(Value::String(name)) => format_named(Some(name))?,
         Some(_) => return Err(format!("format: one of {}", Format::ALL.join(", ")).into()),
     };
-    let given = Variables::from_value(envelope.get("variables").unwrap_or(&Value::Null))?;
+    let given = Variables::with_environment(
+        envelope.get("variables").unwrap_or(&Value::Null),
+        envelope.get("environment").unwrap_or(&Value::Null),
+    )?;
     match envelope.remove("document") {
         Some(Value::String(text)) => import_text_doc(&text, format, mocks, &given),
         Some(doc @ (Value::Object(_) | Value::Array(_))) => {
