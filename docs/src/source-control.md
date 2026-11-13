@@ -128,6 +128,9 @@ instance is pushed and what a pull applies), and `secrets.write` for `git.token`
 | `git.signing_key` (secret) | | unset | The private key commits are signed with: an OpenSSH key without a passphrase. Never the deploy key, never shown again. |
 | `git.verify` | | `false` | Take the repository's side only when an allowed signer signed every commit since the last verified head, see [Verified pulls](#verified-pulls). Turning it on trusts the head of that moment. |
 | `git.allowed_signers` | | empty | Who may sign what this instance pulls: at most 50 lines, a name and a public key each (`ann ssh-ed25519 AAAA...`, or the line of a `.pub` file). Public keys, not secrets. |
+| `git.host` | | `auto` | Whose API [opens a pull request](#opened-by-the-git-host) for a diverged branch: `auto` (GitHub or GitLab when the repository is on `github.com` or `gitlab.com`, nothing otherwise), `none`, `github` or `gitlab` (the kind of a self-hosted host). |
+| `git.host_api` | | unset | The base URL of a self-hosted host's API (`https://git.example.com/api/v3` for the `github` kind, `https://git.example.com/api/v4` for `gitlab`). `https` only. Unset: the public host's API, else the kind's usual path on the repository's host. |
+| `git.host_token` (secret) | | unset | The token the git host's API opens a pull request with. Unset: `git.token`, when that is the authentication and the API is on the repository's own host. Never shown again. |
 
 **Deploy key.** For an ssh remote, **Generate the deploy key** (`POST
 /_rustybin/git/key`) creates an ed25519 key in `<state>/repo.key` (mode `0600`) and
@@ -244,7 +247,7 @@ nothing has diverged):
 {{#include ../examples/config/source-control.sh:what_differs}}
 ```
 
-`POST /_rustybin/git/resolve` `{with, message, branch, dry_run}` is the way out, and a
+`POST /_rustybin/git/resolve` `{with, message, branch, dry_run, open}` is the way out, and a
 person chooses it: the [automatic mode](#automatic-mode) and the webhook never resolve a
 divergence, they keep reporting it (the log, the timeline, the status and the
 `source_control_diverged` check of the [diagnostics](troubleshooting.md)).
@@ -253,7 +256,7 @@ divergence, they keep reporting it (the log, the timeline, the status and the
 |---|---|---|
 | `instance` | The local commits are dropped and this instance's configuration is committed on top of the remote's branch (the new commit's parent is the remote head), then pushed; `message` names the commit. Never a forced push: if the remote moved in between, the push is refused and nothing there changed. | The changes the commit would make to the repository's document |
 | `repository` | The working copy takes the remote's branch and its document is applied with prune, through the same checks as a pull. The local commits are dropped. | The apply's own dry run of the remote's document, validated exactly like the apply; the working copy does not move |
-| `pull_request` | Neither side wins yet. What the instance holds is committed (when it differs from its last commit) and the local branch is pushed to a new branch of the remote: `branch`, or a made name such as `main-instance-20261109-153012`. Nothing is applied, `git.branch` stays, and the answer names the branch and the base to open the pull request against. Never forced: a branch of that name with other commits is refused. | The branch and the commits it would carry |
+| `pull_request` | Neither side wins yet. What the instance holds is committed (when it differs from its last commit) and the local branch is pushed to a new branch of the remote: `branch`, or a made name such as `main-instance-20261109-153012`. Nothing is applied, `git.branch` stays, and the answer names the branch and the base to open the pull request against. Never forced: a branch of that name with other commits is refused. With `open: true` the [git host's API](#opened-by-the-git-host) is then asked to open the pull request. | The branch and the commits it would carry; with `open`, what would be opened and where (`would_open`), and no call is made |
 
 A preview of `repository` is the answer of a pull's dry run: `applied.summary` lists
 what the document itself changes, and `applied.results` is the full account, with what
@@ -298,8 +301,121 @@ diverged, and `repository` takes the merged result. Commits that named
 `pull_request` branch; `instance` and `repository` drop the local commits, and with
 them a checkpoint that was committed and never pushed (commit it again).
 
+### Opened by the git host
+
+With `open: true` the instance does the last step too: after the push it asks the git
+host's API to open the pull request from the new branch into the instance's branch, and
+answers its address. That is the one thing it asks of a host. It never merges a pull
+request, reviews one or comments on one.
+
+**Which host** is the setting `git.host`:
+
+| `git.host` | The host | Its API |
+|---|---|---|
+| `auto` (the default) | GitHub when the repository is on `github.com`, GitLab when it is on `gitlab.com`, by the exact host name. Anything else is `none`. | `https://api.github.com`, `https://gitlab.com/api/v4` |
+| `github` | GitHub, or a GitHub Enterprise Server | `git.host_api`, else `https://<the repository's host>/api/v3` |
+| `gitlab` | GitLab, or a self-managed GitLab (a merge request is its pull request) | `git.host_api`, else `https://<the repository's host>/api/v4` |
+| `none` | No host is ever called | |
+
+A self-hosted host is named on purpose: `auto` does not guess a kind from a name that
+only looks like one. Other kinds of host are not supported; open the pull request by
+hand there.
+
+**The token** is the secret `git.host_token`: for GitHub a token that may write pull
+requests on the repository (a fine-grained token with "Pull requests: read and write",
+or a classic one with `repo`), for GitLab a personal, project or group access token
+with the `api` scope. When it is unset the repository's own token (`git.token`) is
+used, but only when that is the authentication of the remote and the API is on the
+remote's own host (or is the public API of the public host the repository is on): a
+token is never sent to a host other than the one it was set for. A deploy key cannot
+call an API, so an ssh remote needs `git.host_token`. The token is sent to the API in
+a header and is in no answer, log line or audit entry.
+
+```bash
+{{#include ../examples/config/source-control.sh:host_settings}}
+```
+
+The status says where a pull request would be opened, and what is missing:
+`host` is `{setting, kind, api, repository, token_set, token_from, ready, why}`.
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:host_status}}
+```
+
+**The call.** A preview first: with `dry_run` nothing is pushed and the host is not
+called; `would_open` names the host, the two branches, the title and the body.
+
+```bash
+{{#include ../examples/config/source-control.sh:pull_request_open_preview}}
+```
+
+```bash
+{{#include ../examples/config/source-control.sh:pull_request_open}}
+```
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:resolve_pull_request_open}}
+```
+
+The answer is the answer of `pull_request` with:
+
+- `host`: `{kind, api, repository}`, where it was asked;
+- `opened`: whether the host opened it;
+- `untrusted_pull_request`: `{number, url}` as the host answered them. They are the
+  host's words, not the instance's: the address is kept only when it is a plain web
+  address, and the console shows it as a link to open in a new tab;
+- `not_opened` when it did not: `{reason, why, status, untrusted_host_message}`.
+
+**What the instance sends** is its own text. The title is the first line of `message`
+(or a default), and the body says that the instance and the branch have diverged and
+lists, by name, what the instance holds that the repository's document lacks or holds
+differently (forty names at most). Nothing of the repository's side is copied into it:
+no name that only the repository has, no value of either side.
+
+**When the host does not open it**, the branch stays pushed and the call still answers
+`200`: the push went through, so open the pull request by hand as before. `reason`
+says why:
+
+| `reason` | What happened |
+|---|---|
+| `token_refused` | The host does not accept the token (`401`) |
+| `not_permitted` | The token may not open a pull request in that repository (`403`) |
+| `not_found` | The API does not know the repository, or the token may not see it (`404`): check `git.host`, `git.host_api` and the token's reach |
+| `refused` | The host refused the pull request (`400`, `409`, `422`): a branch it does not know, nothing to merge, or one already open |
+| `rate_limited` | Too many calls for now (`429`) |
+| `timeout` | No answer within 20 seconds. Whether the host opened it is not known: look at the host |
+| `redirected` | The API answered a redirect, which is never followed: check `git.host_api` |
+| `unreachable`, `host_error`, `bad_answer` | The connection failed, the host answered another error, or its answer named no pull request |
+| `egress_refused` | The outbound policy refused the API's address when the call was made |
+
+The call is made once and never repeated: a second call would open a second pull
+request on a host that was only slow.
+
+**What is refused before anything is pushed** is a `409` with a `reason`:
+`host_not_set` (`git.host` is `none`, `auto` did not recognise the repository's host,
+or the repository's path is not one the kind's API takes), `host_token_missing`, and
+`egress_refused`. A preview is refused the same way.
+
+**The network.** The call goes out under the [outbound
+policy](configuration.md#outbound-connections)'s purpose `git_host`, whose rule is
+exactly the API's host and port once a host is set up (the remote itself is the purpose
+`git`): pinned addresses, no redirect followed, an answer read to 256 KiB at most. A
+host on a private address needs its network in `RUSTYBIN_EGRESS_ALLOW` like any other
+destination, and one on the same machine `RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true`.
+
+```hurl
+{{#include ../examples/config/git_branches.hurl:host_api_refused}}
+```
+
+A document from the repository never changes `git.host`, `git.host_api` or
+`git.host_token`, like every other `git.*` setting: someone who can push to the
+repository cannot point the instance's token at an API of their own.
+
 In the console the status shows what differs, and **A diverged branch** has the three
-ways out, each with **Preview**.
+ways out, each with **Preview**. Under the pull request way out, **Open the pull
+request at the git host** asks the host's API after the push; the box is off, with the
+reason, until a host and its token are set. The pull request's address is shown under
+the answer.
 
 ## Branches
 
@@ -585,7 +701,9 @@ the right signature does nothing. Without the secret the route answers `404`:
 ## Not in this version
 
 A merge inside the instance: a diverged branch is resolved by naming a side, or in a
-pull request at the git host. Trusting a git host's own web signature when [verifying
+pull request at the git host. Anything at the git host beyond opening that pull
+request (merging it, a review, a comment), and git hosts other than GitHub and GitLab
+with their self-hosted variants. Trusting a git host's own web signature when [verifying
 pulls](#verified-pulls): a squash or rebase merge made by the host is refused, a merge
 commit passes as a clean merge.
 
@@ -595,9 +713,9 @@ The same job from the API, the console, the command line, an agent and the confi
 
 | Surface | Where |
 |---|---|
-| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit` (with `checkpoints`), `/push`, `/pull`, `/resolve` (`instance`, `repository`, `pull_request`, with `dry_run`), `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history`, `GET /_rustybin/git/branches`, `POST /_rustybin/git/branch`, `GET`, `POST /_rustybin/git/signing-key`; `verification` in the status and the `409` with `reason: unverified` of [verified pulls](#verified-pulls); the repository's checkpoints: `GET /_rustybin/checkpoints?from=git`, `POST /_rustybin/checkpoints/{name}/restore?from=git` |
-| Console | **Management, Source control**: the repository form, status (what differs on a diverged branch), connect, commit and push (with a checkpoint choice), pull, a diverged branch's three ways out with a preview, branches (list, preview, switch, start), the deploy key, commit signing, verified pulls (the switch, the signers, the last verified head, the last refusal), history; **Management, Checkpoints, In the repository** |
-| CLI | `rustybin git status`, `init`, `commit` (`--checkpoint NAME`), `push`, `pull`, `resolve` (`--with instance`, `repository` or `pull-request`, `--branch`, `--dry-run`), `key`, `history`, `branches`, `switch`, `branch`, `signing-key`, `signers` (`--add`, `--remove`); `rustybin checkpoint list --from-git`, `checkpoint restore NAME --from-git` ([reference](cli.md#git)) |
-| Management MCP | `git_status`, `git_init`, `git_commit` (`checkpoints`), `git_push`, `git_pull`, `git_resolve`, `git_deploy_key`, `git_branches`, `git_switch_branch`, `git_signing_key`, `list_repository_checkpoints`, `restore_checkpoint` with `from: "git"` (`git_status` answers `verification`, and the tools that take the repository's side answer the refusal: `reason`, `commit`, `why`); the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
-| `rustybin.yaml` | Never: the `git.*` settings (the remote, the branch, the token, signing) are not exported, and a document from the repository cannot change one, so a document in a repository cannot point the instance elsewhere. The settings themselves: `git.branch`, `git.sign`, the secret `git.signing_key`, `git.verify`, `git.allowed_signers` |
+| API | `GET /_rustybin/git`, `POST /_rustybin/git/init`, `/commit` (with `checkpoints`), `/push`, `/pull`, `/resolve` (`instance`, `repository`, `pull_request`, with `dry_run`; `open` with `pull_request`: `opened`, `untrusted_pull_request`, `not_opened`), `host` in the status, `GET`, `POST /_rustybin/git/key`, `GET /_rustybin/git/history`, `GET /_rustybin/git/branches`, `POST /_rustybin/git/branch`, `GET`, `POST /_rustybin/git/signing-key`; `verification` in the status and the `409` with `reason: unverified` of [verified pulls](#verified-pulls); the repository's checkpoints: `GET /_rustybin/checkpoints?from=git`, `POST /_rustybin/checkpoints/{name}/restore?from=git` |
+| Console | **Management, Source control**: the repository form, status (what differs on a diverged branch), connect, commit and push (with a checkpoint choice), pull, a diverged branch's three ways out with a preview (and **Open the pull request at the git host**, with its address shown after), branches (list, preview, switch, start), the deploy key, commit signing, verified pulls (the switch, the signers, the last verified head, the last refusal), history; **Management, Checkpoints, In the repository** |
+| CLI | `rustybin git status`, `init`, `commit` (`--checkpoint NAME`), `push`, `pull`, `resolve` (`--with instance`, `repository` or `pull-request`, `--branch`, `--dry-run`, `--open`), `key`, `history`, `branches`, `switch`, `branch`, `signing-key`, `signers` (`--add`, `--remove`); `rustybin checkpoint list --from-git`, `checkpoint restore NAME --from-git` ([reference](cli.md#git)) |
+| Management MCP | `git_status`, `git_init`, `git_commit` (`checkpoints`), `git_push`, `git_pull`, `git_resolve` (`open`: confirmed, the address under `untrusted_pull_request`), `git_deploy_key`, `git_branches`, `git_switch_branch`, `git_signing_key`, `list_repository_checkpoints`, `restore_checkpoint` with `from: "git"` (`git_status` answers `verification`, and the tools that take the repository's side answer the refusal: `reason`, `commit`, `why`); the prompt `backup_to_git` ([agent page](agent-mcp.md)) |
+| `rustybin.yaml` | Never: the `git.*` settings (the remote, the branch, the token, signing) are not exported, and a document from the repository cannot change one, so a document in a repository cannot point the instance elsewhere. The settings themselves: `git.branch`, `git.sign`, the secret `git.signing_key`, `git.verify`, `git.allowed_signers`, `git.host`, `git.host_api`, the secret `git.host_token` |
 | Environment | `RUSTYBIN_CONFIG_GIT`, `_REF`, `_PATH`, `_AUTH`, `_TOKEN`, `_AUTO`, `_REQUIRED` ([configuration](configuration.md#source-control)) |

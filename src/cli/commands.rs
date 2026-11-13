@@ -269,6 +269,10 @@ const RESOLVE_FLAGS: &[Flag] = &[
         "--dry-run",
         "What the way out would change; nothing changes",
     ),
+    Flag::switch(
+        "--open",
+        "pull-request: ask the git host's API to open the pull request after the push (the git.host settings)",
+    ),
 ];
 const SIGNERS_FLAGS: &[Flag] = &[
     Flag::value(
@@ -539,7 +543,7 @@ pub static COMMANDS: &[Cmd] = &[
     cmd!("git", "commit", "-m \"<message>\" [--checkpoint NAME]...", "Export the instance into the working copy and commit; --checkpoint also commits a local checkpoint (repeat it, or a,b).", COMMIT_FLAGS,[("POST", "/_rustybin/git/commit")], false, "git commit -m \"Add the orders mock\""),
     cmd!("git", "push", "", "Push the branch.", NO_FLAGS, [("POST", "/_rustybin/git/push")], false, "git push"),
     cmd!("git", "pull", "[--apply] [--dry-run] [--prune]", "Fetch and fast-forward; --apply applies the repository's document.", &[Flag::switch("--apply", "Apply the document"), Flag::switch("--dry-run", "Show the diff, apply nothing"), Flag::switch("--prune", "The document is the whole truth")], [("POST", "/_rustybin/git/pull")], false, "git pull --apply --dry-run"),
-    cmd!("git", "resolve", "--with instance|repository|pull-request [--branch NAME] [--dry-run]", "The ways out of a diverged branch (git status shows what differs): the instance's copy wins, the repository's wins, or the instance's side goes to a new branch for a pull request at the git host (nothing applied). --dry-run previews any of them.", RESOLVE_FLAGS, [("POST", "/_rustybin/git/resolve")], false, "git resolve --with repository --dry-run"),
+    cmd!("git", "resolve", "--with instance|repository|pull-request [--branch NAME] [--open] [--dry-run]", "The ways out of a diverged branch (git status shows what differs): the instance's copy wins, the repository's wins, or the instance's side goes to a new branch for a pull request at the git host (nothing applied). With pull-request, --open asks the git host's API to open the pull request (never to merge it) and prints its address; when the host does not open it the branch stays pushed and the reason is printed. --dry-run previews any of them.", RESOLVE_FLAGS, [("POST", "/_rustybin/git/resolve")], false, "git resolve --with repository --dry-run"),
     cmd!("git", "key", "[--generate] [--replace]", "The deploy key's public half; --generate makes one.", &[Flag::switch("--generate", "Generate the key"), Flag::switch("--replace", "Replace an existing key")], [("GET", "/_rustybin/git/key"), ("POST", "/_rustybin/git/key")], true, "git key --generate"),
     cmd!("git", "history", "", "The last commits of the working copy.", NO_FLAGS, [("GET", "/_rustybin/git/history")], false, "git history"),
     // ── Harness ──
@@ -4273,6 +4277,12 @@ async fn portal(ctx: &mut Ctx, verb: &str) -> Result<()> {
 
 // ── Config ──────────────────────────────────────────────────────────
 
+/// Text that came from somewhere else (a git host's answer), for a
+/// terminal: no control characters, so no escape sequence is printed.
+fn printable(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
 fn print_apply_report(ctx: &mut Ctx, report: &Value) {
     if ctx.json {
         ctx.emit(report);
@@ -4501,10 +4511,18 @@ async fn git(ctx: &mut Ctx, verb: &str) -> Result<()> {
             if let Some(branch) = ctx.args.value("--branch") {
                 body["branch"] = json!(branch);
             }
+            let open = ctx.args.has("--open");
+            if open {
+                if with != "pull_request" {
+                    return Err(Fail::Usage("--open goes with --with pull-request".into()));
+                }
+                body["open"] = json!(true);
+            }
             if !dry_run {
                 ctx.confirm(&match with.as_str() {
                     "instance" => "git resolve: replace the repository's configuration with this instance's".to_string(),
                     "repository" => "git resolve: replace this instance's configuration with the repository's (with prune)".to_string(),
+                    _ if open => "git resolve: push this instance's side to a new branch and ask the git host to open a pull request".to_string(),
                     _ => "git resolve: push this instance's side to a new branch for a pull request".to_string(),
                 })?;
             }
@@ -4521,6 +4539,35 @@ async fn git(ctx: &mut Ctx, verb: &str) -> Result<()> {
                     for line in v[key].as_array().into_iter().flatten() {
                         ctx.raw(&format!("  {}", line.as_str().unwrap_or("")));
                     }
+                }
+                // What the git host answered (its words, not this
+                // instance's): the pull request, or why there is none.
+                let pr = &v["untrusted_pull_request"];
+                if pr.is_object() {
+                    ctx.raw(&format!(
+                        "  pull request{}{}",
+                        pr["number"]
+                            .as_u64()
+                            .map(|n| format!(" {n}"))
+                            .unwrap_or_default(),
+                        pr["url"]
+                            .as_str()
+                            .map(|u| format!(": {}", printable(u)))
+                            .unwrap_or_default()
+                    ));
+                }
+                if let Some(said) = v["not_opened"]["untrusted_host_message"].as_str() {
+                    ctx.raw(&format!("  the git host said: {}", printable(said)));
+                }
+                let would = &v["would_open"];
+                if would.is_object() {
+                    ctx.raw(&format!(
+                        "  would open at {} ({}), {}: {}",
+                        would["host"]["api"].as_str().unwrap_or(""),
+                        would["host"]["kind"].as_str().unwrap_or(""),
+                        would["host"]["repository"].as_str().unwrap_or(""),
+                        would["title"].as_str().unwrap_or("")
+                    ));
                 }
                 if v["applied"].is_object() {
                     print_apply_report(ctx, &v["applied"]);

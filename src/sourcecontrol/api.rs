@@ -2,7 +2,7 @@
 //!
 //! - `GET /_rustybin/git?fetch=true`: status (remote, branch, head, ahead
 //!   and behind, the drift between the working copy and the instance, the
-//!   deploy key, `verification`, the timeline).
+//!   deploy key, `verification`, `host`, the timeline).
 //! - With `git.verify` on, every route that takes the repository's side
 //!   (pull, resolve with `repository`, branch, init's first checkout)
 //!   answers `409` with `reason: unverified`, `commit` and `why` for a
@@ -12,7 +12,8 @@
 //!   working copy and commit, with the named checkpoints.
 //! - `POST /_rustybin/git/push`, `POST /_rustybin/git/pull` `{apply,
 //!   dry_run, prune}`, `POST /_rustybin/git/resolve` `{with, message,
-//!   branch, dry_run}`: the ways out of a diverged branch.
+//!   branch, dry_run, open}`: the ways out of a diverged branch (`open`:
+//!   the git host's API is asked to open the pull request, `host.rs`).
 //! - `GET`, `POST /_rustybin/git/key` `{replace}`: the deploy key.
 //! - `GET /_rustybin/git/history`: the last 50 commits.
 //! - `GET /_rustybin/git/branches`: the remote's branches; `POST
@@ -176,6 +177,9 @@ struct ResolveBody {
     /// What the way out would do, nothing changed.
     #[serde(default)]
     dry_run: bool,
+    /// `pull_request`: ask the git host to open the pull request.
+    #[serde(default)]
+    open: bool,
 }
 
 async fn resolve(
@@ -192,6 +196,7 @@ async fn resolve(
         message: b.message,
         branch: b.branch,
         dry_run: b.dry_run,
+        open: b.open,
     };
     answer(
         state
@@ -474,14 +479,19 @@ pub fn catalog() -> Vec<Endpoint> {
         Endpoint::new(RESOLVE_PATH, &["POST"], category::CONTROL, "Resolve a diverged branch (admin)")
 .permission(crate::rbac::Permission::GitWrite)
             .description(
-                "{with: instance | repository | pull_request, message, branch, dry_run}: the ways \
+                "{with: instance | repository | pull_request, message, branch, dry_run, open}: the ways \
                  out of a diverged branch, each a person's call (the automatic mode never \
                  resolves). instance drops the local commits, commits this instance's \
                  configuration on top of the remote head and pushes (never a forced push); \
                  repository takes the remote's branch and applies it with prune; pull_request \
                  pushes this instance's side to a new branch (branch, or a made name) for a \
-                 pull request at the git host and applies nothing. dry_run answers what the \
-                 way out would change, validated like the apply.",
+                 pull request at the git host and applies nothing; with open: true the git \
+                 host's API (the git.host, git.host_api and git.host_token settings; egress \
+                 purpose git_host) is then asked to open that pull request, never to merge it: \
+                 {opened, untrusted_pull_request: {number, url}}, or {opened: false, not_opened: \
+                 {reason, why}} with the branch left pushed. What the settings cannot serve is a \
+                 409 before anything is pushed. dry_run answers what the way out would change, \
+                 validated like the apply (with open: would_open, and no call is made).",
             )
             .example(
                 Example::post("Resolve with the instance's copy", RESOLVE_PATH)
@@ -548,7 +558,7 @@ pub fn openapi_paths() -> Value {
         GIT_PATH: { "get": {
             "tags": tags, "summary": "Source control status", "operationId": "gitStatus",
             "parameters": [{ "name": "fetch", "in": "query", "schema": { "type": "boolean" }, "description": "Ask the remote for ahead and behind" }],
-            "responses": { "200": { "description": "{git, remote, branch, path, auth, initialised, head, ahead, behind, drift, divergence (what differs and the ways out, when diverged), deploy_key, signing, verification: {enabled, signers: [{name, key_type, fingerprint}], own_key, since, trusted, verified_head, last_refusal, problem}, timeline}" }, "401": admin }
+            "responses": { "200": { "description": "{git, remote, branch, path, auth, initialised, head, ahead, behind, drift, divergence (what differs and the ways out, when diverged), host: {setting, kind, api, repository, token_set, token_from, ready, why} (where resolve with pull_request and open would open a pull request), deploy_key, signing, verification: {enabled, signers: [{name, key_type, fingerprint}], own_key, since, trusted, verified_head, last_refusal, problem}, timeline}" }, "401": admin }
         } },
         INIT_PATH: { "post": { "tags": tags, "summary": "Connect the repository", "operationId": "gitInit", "responses": ok("{initialised, fresh, remote_branch, head}") } },
         COMMIT_PATH: { "post": { "tags": tags, "summary": "Commit the instance's configuration", "operationId": "gitCommit",
@@ -568,8 +578,9 @@ pub fn openapi_paths() -> Value {
                 "with": { "type": "string", "enum": ["instance", "repository", "pull_request"] },
                 "message": { "type": "string", "description": "The commit message when the instance's side is committed" },
                 "branch": { "type": "string", "maxLength": 128, "description": "pull_request: the new branch (a name is made when absent)" },
-                "dry_run": { "type": "boolean", "default": false, "description": "What the way out would change; nothing is changed" } } } } } },
-            "responses": ok("{resolved, commit, push}, {resolved, applied, head} or {resolved, branch, base, pushed}; with dry_run {dry_run, would_resolve, ...}") } },
+                "dry_run": { "type": "boolean", "default": false, "description": "What the way out would change; nothing is changed" },
+                "open": { "type": "boolean", "default": false, "description": "pull_request: after the push, ask the git host's API to open the pull request (never to merge it). 409 before anything is pushed when no host is set up, no token is set or the outbound policy refuses the API (reason: host_not_set, host_token_missing, egress_refused)" } } } } } },
+            "responses": ok("{resolved, commit, push}, {resolved, applied, head} or {resolved, branch, base, pushed}; with open also {host: {kind, api, repository}, opened, untrusted_pull_request: {number, url} (the git host's answer) or not_opened: {reason, why, status, untrusted_host_message}}; with dry_run {dry_run, would_resolve, ...} and, with open, would_open: {host, base, head, title, body}") } },
         KEY_PATH: {
             "get": { "tags": tags, "summary": "The deploy key's public half", "operationId": "gitKey", "responses": { "200": { "description": "{deploy_key: {public, path} | null}" }, "401": admin } },
             "post": { "tags": tags, "summary": "Generate the deploy key", "operationId": "gitGenerateKey",

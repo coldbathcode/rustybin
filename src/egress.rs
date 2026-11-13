@@ -718,10 +718,14 @@ pub enum Purpose {
     /// The client ID metadata document of an agent signing in to
     /// `/_rustybin/mcp` (`crate::control_oauth::client_docs`).
     ClientMetadata,
+    /// The git host's API, asked to open a pull request for a diverged
+    /// branch (`crate::sourcecontrol::host`). Never the remote itself,
+    /// which is [`Purpose::Git`].
+    GitHost,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 16] = [
+    pub const ALL: [Purpose; 17] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -738,6 +742,7 @@ impl Purpose {
         Purpose::Record,
         Purpose::Events,
         Purpose::ClientMetadata,
+        Purpose::GitHost,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -758,6 +763,7 @@ impl Purpose {
             Purpose::Record => "record",
             Purpose::Events => "events",
             Purpose::ClientMetadata => "client_metadata",
+            Purpose::GitHost => "git_host",
         }
     }
 
@@ -780,6 +786,7 @@ impl Purpose {
             Purpose::Record => "Recordings of a real API",
             Purpose::Events => "Event mock webhooks",
             Purpose::ClientMetadata => "Client ID metadata documents of agents signing in",
+            Purpose::GitHost => "Git host API",
         }
     }
 
@@ -808,6 +815,7 @@ impl Purpose {
             Purpose::ClientMetadata => {
                 "RUSTYBIN_EGRESS_ALLOW only (the hosts of the clients' documents; no default), and only with oauth.client_metadata_documents on"
             }
+            Purpose::GitHost => "the git host's API (git.host, git.host_api), once a host is set",
         }
     }
 }

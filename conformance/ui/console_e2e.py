@@ -3720,7 +3720,8 @@ def run_secret_requests(browser):
 
 def run_source_control(browser):
     """Management, Source control against a real repository: a diverged
-    branch (what differs, a preview, a pull request), branches (list,
+    branch (what differs, a preview, a pull request, and the git host's API
+    opening it when the box is ticked), branches (list,
     preview, start) and the commit signing key. The instance and its bare
     repository are this function's own: started here, stopped here."""
     import shutil
@@ -3830,6 +3831,11 @@ def run_source_control(browser):
         step("source control: each way out previews without changing anything", previews_change_nothing)
 
         def pull_request_names_the_branch():
+            # A local repository has no git host: the box that would ask
+            # one to open the pull request is there, off, and says why.
+            expect(page.locator("#git-resolve-open")).to_be_disabled()
+            expect(page.locator("#git-resolve-open-hint")).to_contain_text("Not possible yet")
+            expect(page.locator("#git-host")).to_contain_text("none")
             page.fill("#git-resolve-branch", "review/title")
             page.click("#git-resolve-pr")
             page.wait_for_selector("#git-result >> text=open a pull request from review/title into main")
@@ -3844,6 +3850,82 @@ def run_source_control(browser):
             shot(page, "git", "61-source-control-branches")
 
         step("source control: the instance's side goes to a branch for a pull request, and the branches list it", pull_request_names_the_branch)
+
+        def the_git_host_opens_the_pull_request():
+            # A stand-in for a git host's API on loopback (never a real
+            # host): it answers the one call the instance makes.
+            import http.server
+            import threading
+
+            calls = []
+            repository = os.path.basename(tmp) + "/config"
+
+            class Host(http.server.BaseHTTPRequestHandler):
+                def do_POST(self):
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
+                    calls.append({"path": self.path, "authorization": self.headers.get("Authorization"), "body": body})
+                    ok = self.path == f"/api/v3/repos/{repository}/pulls" and self.headers.get("Authorization") == "Bearer ui-host-token-123456"
+                    answer = ({"number": 12, "html_url": f"https://git.example.test/{repository}/pull/12"} if ok
+                              else {"message": "Not Found"})
+                    data = json.dumps(answer).encode()
+                    self.send_response(201 if ok else 404)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                def log_message(self, *args):
+                    pass
+
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Host)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                code, body = api("PATCH", "/_rustybin/settings", {
+                    "values": {"git.host": "github", "git.host_api": f"http://127.0.0.1:{srv.server_address[1]}/api/v3"},
+                    "secrets": {"git.host_token": "ui-host-token-123456"}})
+                assert code == 200, body
+                page.click("#git-refresh")
+                page.wait_for_selector("#git-host >> text=can open a pull request")
+                expect(page.locator("#git-resolve-open")).to_be_enabled()
+                expect(page.locator("#git-resolve-open-hint")).to_contain_text("never merged from here")
+                page.fill("#git-resolve-branch", "review/opened")
+                page.check("#git-resolve-open")
+                # The preview says what would be opened and where, and
+                # calls nothing.
+                page.click("#git-resolve-pr-preview")
+                page.wait_for_selector("#git-would-open >> text=from review/opened into main")
+                expect(page.locator("#git-would-open")).to_contain_text(repository)
+                assert calls == [], calls
+                # The box and the branch survive the preview.
+                expect(page.locator("#git-resolve-open")).to_be_checked()
+                page.click("#git-resolve-pr")
+                page.wait_for_selector("#git-pull-request")
+                expect(page.locator("#git-result")).to_contain_text("opened a pull request from review/opened into main")
+                link = page.locator("#git-pull-request a")
+                expect(link).to_have_text(f"https://git.example.test/{repository}/pull/12")
+                expect(link).to_have_attribute("rel", "noopener noreferrer")
+                expect(page.locator("#git-pull-request")).to_contain_text("Pull request 12")
+                assert len(calls) == 1, calls
+                assert calls[0]["body"]["head"] == "review/opened" and calls[0]["body"]["base"] == "main", calls
+                # The token is on no page: not in the form, not in the answer.
+                assert "ui-host-token-123456" not in page.content()
+                shot(page, "git", "61b-source-control-pull-request-opened")
+                # A host that refuses: the branch is pushed all the same,
+                # and the page says why there is no pull request.
+                code, body = api("PATCH", "/_rustybin/settings", {"secrets": {"git.host_token": "another-token-654321"}})
+                assert code == 200, body
+                page.fill("#git-resolve-branch", "review/refused")
+                page.click("#git-resolve-pr")
+                page.wait_for_selector("#git-result >> text=the pull request was not opened")
+                expect(page.locator("#git-not-opened")).to_contain_text("Not Found")
+                expect(page.locator("#git-pull-request")).to_have_count(0)
+                assert len(calls) == 2, calls
+            finally:
+                srv.shutdown()
+                # Back to no host, so the rest of the walk is as before.
+                api("PATCH", "/_rustybin/settings", {"values": {"git.host": "none"}})
+
+        step("source control: the git host opens the pull request when the box is ticked, and its address is shown", the_git_host_opens_the_pull_request)
 
         def a_new_branch_and_the_setting():
             page.fill("#git-branch-new", "staging")

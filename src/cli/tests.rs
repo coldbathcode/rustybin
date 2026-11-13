@@ -1643,3 +1643,141 @@ async fn harness_import_reads_a_script_and_refuses_a_program() {
     assert_eq!(code, 1);
     assert!(why.contains("never run or translated"), "{why}");
 }
+
+/// Core next 20: `git resolve --with pull-request --open` asks the git
+/// host's API to open the pull request and prints its address.
+#[tokio::test]
+async fn git_resolve_open_asks_the_git_host() {
+    use crate::sourcecontrol::fake_host::{Fake, READER, WRITER};
+    if !std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        eprintln!("git is not installed: skipped");
+        return;
+    }
+    let inst = instance().await;
+    inst.login().await;
+    let bare = inst.home.path().join("remote.git");
+    let out = std::process::Command::new("git")
+        .args(["init", "--quiet", "--bare", "-b", "main"])
+        .arg(&bare)
+        .output()
+        .expect("git init --bare");
+    assert!(out.status.success());
+    let repository = format!(
+        "{}/remote",
+        inst.home
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("directory name")
+    );
+    let fake = Fake::start("gitlab", &repository, &bare).await;
+    let remote = format!("file://{}", bare.display());
+    inst.json(&["settings", "set", "git.remote", &remote]).await;
+    inst.json(&["git", "init"]).await;
+    inst.json(&["git", "commit", "-m", "First"]).await;
+    inst.json(&["git", "push"]).await;
+    inst.json(&["settings", "set", "console.title", "For review"])
+        .await;
+
+    // No host is set up for a local repository: said before any push.
+    let open = [
+        "git",
+        "resolve",
+        "--with",
+        "pull-request",
+        "--branch",
+        "review/title",
+        "--open",
+    ];
+    let (code, _, why) = inst.run_full(None, &[&open[..], &["--yes"]].concat()).await;
+    assert_eq!(code, 1, "{why}");
+    assert!(why.contains("git.host"), "{why}");
+    inst.json(&["settings", "set", "git.host", "gitlab"]).await;
+    inst.json(&["settings", "set", "git.host_api", &fake.api])
+        .await;
+    let token = |value: &str| {
+        let mut secrets = std::collections::BTreeMap::new();
+        secrets.insert("git.host_token".to_string(), Some(value.to_string()));
+        inst.state
+            .settings
+            .update(Default::default(), secrets, "test")
+            .expect("token");
+    };
+    token(WRITER);
+    let v = inst.json(&["git", "status"]).await;
+    assert_eq!(v["host"]["ready"], json!(true), "{v}");
+    assert_eq!(v["host"]["kind"], json!("gitlab"));
+
+    // The preview: what would be opened and where, nothing called.
+    let (code, text) = inst.run(None, &[&open[..], &["--dry-run"]].concat()).await;
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("would then ask"), "{text}");
+    assert!(text.contains("would open at"), "{text}");
+    assert_eq!(fake.call_count(), 0);
+    // --open goes with pull-request only.
+    let (code, _) = inst
+        .run(
+            None,
+            &["git", "resolve", "--with", "instance", "--open", "--yes"],
+        )
+        .await;
+    assert_eq!(code, 2);
+
+    // Pushed and opened: the address the host answered is printed.
+    let (code, text) = inst.run(None, &[&open[..], &["--yes"]].concat()).await;
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("opened a pull request"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "pull request 1: https://gitlab.example/{repository}/-/merge_requests/1"
+        )),
+        "{text}"
+    );
+    assert_eq!(fake.call_count(), 1);
+    assert_eq!(
+        fake.last_call()["body"]["source_branch"],
+        json!("review/title")
+    );
+    assert_eq!(fake.last_call()["body"]["target_branch"], json!("main"));
+
+    // A host that refuses: the branch is pushed, so the command succeeds
+    // and says why there is no pull request.
+    token(READER);
+    let (code, text) = inst
+        .run(
+            None,
+            &[
+                "git",
+                "resolve",
+                "--with",
+                "pull-request",
+                "--branch",
+                "review/again",
+                "--open",
+                "--yes",
+            ],
+        )
+        .await;
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("was not opened"), "{text}");
+    assert!(text.contains("the git host said: 403 Forbidden"), "{text}");
+    assert!(!text.contains(READER) && !text.contains(WRITER), "{text}");
+    let v = inst
+        .json(&[
+            "git",
+            "resolve",
+            "--with",
+            "pull-request",
+            "--branch",
+            "review/json",
+            "--open",
+            "--yes",
+        ])
+        .await;
+    assert_eq!(v["opened"], json!(false), "{v}");
+    assert_eq!(v["not_opened"]["reason"], json!("not_permitted"), "{v}");
+}

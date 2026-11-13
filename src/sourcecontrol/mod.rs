@@ -47,12 +47,16 @@ use crate::state::AppState;
 pub mod api;
 pub mod branches;
 pub mod checkpoints;
+#[cfg(test)]
+pub(crate) mod fake_host;
+pub mod host;
 pub mod signing;
 #[cfg(test)]
 mod tests;
 pub mod verify;
 
 pub use branches::BranchRequest;
+pub use host::{HOST_API_KEY, HOST_KEY, HOST_OPTIONS, HOST_TOKEN_KEY};
 pub use signing::{SIGNING_KEY_FILE, SIGNING_KEY_KEY, SIGN_KEY};
 pub use verify::{ALLOWED_SIGNERS_KEY, VERIFY_KEY};
 
@@ -246,6 +250,35 @@ pub fn specs() -> Vec<Spec> {
         )
         .normalize(verify::normalize_signers)
         .check(verify::check_signers),
+        Spec::new(
+            HOST_KEY,
+            "git",
+            "Git host",
+            "Whose API opens a pull request for a diverged branch (resolve with pull_request and open): auto recognises github.com and gitlab.com from the repository's host and is none for anything else; none never calls a host; github or gitlab names the kind of a self-hosted host. Only ever opens a pull request: never merges, reviews or comments.",
+            Kind::Choice {
+                options: HOST_OPTIONS,
+            },
+            json!("auto"),
+        ),
+        Spec::new(
+            HOST_API_KEY,
+            "git",
+            "Git host API",
+            "The base URL of a self-hosted git host's API (https://git.example.com/api/v3 for the github kind, https://git.example.com/api/v4 for gitlab). Empty: the public host's API, else the kind's usual path on the repository's host. Its host is allowed by the outbound policy (purpose git_host) once set.",
+            Kind::Text { max_len: 512 },
+            Value::Null,
+        )
+        .normalize(host::normalize_api)
+        .check(host::check_api),
+        Spec::new(
+            HOST_TOKEN_KEY,
+            "git",
+            "Git host token",
+            "The token the git host's API opens a pull request with (it needs the right to write pull requests on the repository). Never shown again. Empty: the repository's token above is used when it is the authentication and the API is the repository's own host.",
+            Kind::Text { max_len: 512 },
+            Value::Null,
+        )
+        .secret(),
     ]
 }
 
@@ -606,10 +639,20 @@ pub struct SourceControl {
     verify_seen: AtomicU64,
     /// The last commit a verification refused, until one passes.
     last_refusal: Mutex<Option<Value>>,
+    /// How long the git host's API may take (`host.rs`; lowered by tests).
+    host_timeout_ms: AtomicU64,
 }
 
 impl SourceControl {
     pub fn new(config: &Config, settings: Arc<Settings>, egress: Arc<Egress>) -> Self {
+        let git = Self::build(config, settings, egress);
+        // The outbound rule of the git host's API, from the settings as
+        // they are (kept in step at every status and every call).
+        git.sync_host_egress(&git.host_setup());
+        git
+    }
+
+    fn build(config: &Config, settings: Arc<Settings>, egress: Arc<Egress>) -> Self {
         Self {
             webhook_busy: AtomicBool::new(false),
             webhook_again: AtomicBool::new(false),
@@ -631,6 +674,9 @@ impl SourceControl {
             last_sync: Mutex::new(None),
             verify_seen: AtomicU64::new(0),
             last_refusal: Mutex::new(None),
+            host_timeout_ms: AtomicU64::new(
+                u64::try_from(host::HOST_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+            ),
         }
     }
 
@@ -1094,7 +1140,10 @@ impl SourceControl {
     /// removed, cut to a bounded length.
     fn scrub(&self, bytes: &[u8]) -> String {
         let mut text = String::from_utf8_lossy(bytes).to_string();
-        if let Some(t) = self.settings.secret(TOKEN_KEY) {
+        for key in [TOKEN_KEY, HOST_TOKEN_KEY] {
+            let Some(t) = self.settings.secret(key) else {
+                continue;
+            };
             if t.len() >= 8 {
                 text = text.replace(t.as_str(), "***");
             }
@@ -1246,6 +1295,7 @@ impl SourceControl {
             "deploy_key": deploy_key,
             "signing": self.signing(),
             "verification": self.verification(),
+            "host": self.host_status(),
             "divergence": null,
             "head": null,
             "upstream": false,
@@ -1982,20 +2032,32 @@ impl SourceControl {
                 "with must be instance (this instance's copy wins), repository (the repository's copy wins) or pull_request (this instance's side goes to a new branch for a pull request at the git host)",
             ));
         }
+        if req.open && with != "pull_request" {
+            return Err(GitError::new(
+                StatusCode::BAD_REQUEST,
+                "open goes with pull_request: the other ways out open nothing at the git host",
+            ));
+        }
         if req.dry_run {
             // A preview is not an operation of the timeline.
             return match with {
                 "instance" => self.preview_instance(state).await,
                 "repository" => self.preview_repository(state, by).await,
                 _ => {
-                    self.resolve_pull_request(state, req.branch.as_deref(), &req.message, true)
-                        .await
+                    self.resolve_pull_request(
+                        state,
+                        req.branch.as_deref(),
+                        &req.message,
+                        true,
+                        req.open,
+                    )
+                    .await
                 }
             };
         }
         let started = Instant::now();
         let result = if with == "pull_request" {
-            self.resolve_pull_request(state, req.branch.as_deref(), &req.message, false)
+            self.resolve_pull_request(state, req.branch.as_deref(), &req.message, false, req.open)
                 .await
         } else {
             self.resolve_inner(state, with, &req.message, by).await
@@ -2396,6 +2458,9 @@ pub struct Resolve {
     pub branch: Option<String>,
     /// Answer what would happen, change nothing.
     pub dry_run: bool,
+    /// `pull_request`: after the push, ask the git host to open the pull
+    /// request (`host.rs`).
+    pub open: bool,
 }
 
 fn busy() -> GitError {

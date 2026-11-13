@@ -1,4 +1,5 @@
-# Source control: a diverged branch's ways out, branches per environment,
+# Source control: a diverged branch's ways out (and the git host's API
+# opening the pull request), branches per environment,
 # signed commits and verified pulls (docs/src/source-control.md), on the first documentation
 # instance. It has no state directory, so the calls that need a working copy
 # answer 409 and say so; docs/examples/config/source-control.sh runs the same
@@ -35,6 +36,50 @@ HTTP 409
 [Asserts]
 jsonpath "$.error" contains "RUSTYBIN_STATE_DIR"
 # ANCHOR_END: resolve_pull_request
+
+# ANCHOR: host_status
+# Where a pull request would be opened through the git host's API: nowhere
+# here (no repository is configured), and why.
+GET {{base_url}}/_rustybin/git
+Authorization: Bearer {{admin_token}}
+HTTP 200
+[Asserts]
+jsonpath "$.host.setting" == "auto"
+jsonpath "$.host.kind" == null
+jsonpath "$.host.ready" == false
+jsonpath "$.host.why" contains "no repository is configured"
+# ANCHOR_END: host_status
+
+# ANCHOR: resolve_pull_request_open
+# The same, and the git host's API is asked to open the pull request.
+POST {{base_url}}/_rustybin/git/resolve
+Authorization: Bearer {{admin_token}}
+{"with": "pull_request", "branch": "review/orders", "open": true}
+HTTP 409
+[Asserts]
+jsonpath "$.error" contains "RUSTYBIN_STATE_DIR"
+# ANCHOR_END: resolve_pull_request_open
+
+# open goes with pull_request only.
+POST {{base_url}}/_rustybin/git/resolve
+Authorization: Bearer {{admin_token}}
+{"with": "instance", "open": true}
+HTTP 400
+[Asserts]
+jsonpath "$.error" contains "open goes with pull_request"
+
+# ANCHOR: host_api_refused
+# The API of a self-hosted git host is an https address (the token goes to
+# it): anything else is refused, and nothing is stored.
+PATCH {{base_url}}/_rustybin/settings
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "values": { "git.host": "gitlab", "git.host_api": "http://git.example.com/api/v4" } }
+HTTP 400
+[Asserts]
+jsonpath "$.error" == "invalid settings"
+jsonpath "$.problems[0]" contains "must use https"
+# ANCHOR_END: host_api_refused
 
 # Anything else is not a way out.
 POST {{base_url}}/_rustybin/git/resolve

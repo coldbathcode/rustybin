@@ -155,7 +155,10 @@ interval, `1m` to `24h`, `5m` by default), the secret `git.webhook_secret` (a gi
 default) with the secret `git.signing_key` for [signed
 commits](source-control.md#signed-commits), and `git.verify` (off by default) with
 `git.allowed_signers` (names and public keys, at most 50) for [verified
-pulls](source-control.md#verified-pulls). No document sets any of them from the
+pulls](source-control.md#verified-pulls), and `git.host` (`auto` by default: `auto`,
+`none`, `github` or `gitlab`), `git.host_api` (a self-hosted host's API, `https` only)
+and the secret `git.host_token` for a [pull request opened by the git
+host](source-control.md#opened-by-the-git-host). No document sets any of them from the
 repository, and `git.branch` changes with a [switch of
 branch](source-control.md#branches).
 
@@ -256,6 +259,7 @@ under a **purpose** with its own rule, on only when the feature is configured:
 | `registry` | `registry.modelcontextprotocol.io` (the MCP registry) and the hosts of the saved registries (`registry.saved`), for [browsing a registry](mcp/registry.md#browsing-a-real-registry). |
 | `assist` | The [AI assist](ai-assist.md) provider's host once its key is set (`api.anthropic.com`, `api.openai.com`, `generativelanguage.googleapis.com`, the compatible base URL's host). |
 | `git` | The git remote's host once configured; see [source control](source-control.md). |
+| `git_host` | The host and port of the git host's API once a host is set up (`git.host`, `git.host_api`: `api.github.com`, `gitlab.com`, or a self-hosted host's API), for [opening a pull request](source-control.md#opened-by-the-git-host). Never the remote itself. |
 | `mcp_relay` | No default: name the MCP servers the [inspector](mcp/inspector.md) may relay to and run checks against in `RUSTYBIN_EGRESS_ALLOW`. This instance's own MCP servers are relayed in process and need no entry. |
 | `replay` | No default: name the gateways [saved tests](saved-tests.md) run through in `RUSTYBIN_EGRESS_ALLOW`. Tests without a gateway run in process and need no entry. |
 | `scenario` | No default: name the gateway a [gateway scenario](gateway-scenarios.md) checks through in `RUSTYBIN_EGRESS_ALLOW` (`RUSTYBIN_EGRESS_ALLOW_LOOPBACK=true` for a gateway on the same machine). |

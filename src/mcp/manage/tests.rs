@@ -5250,3 +5250,167 @@ async fn event_tools_list_publish_read_and_confirm_a_subscriber() {
     let r = tool(&app, &[], "list_channels", json!({ "name": "petstore" })).await;
     assert_eq!(r["isError"], json!(true));
 }
+
+/// Core next 20: `git_resolve` with `open` asks the git host's API to open
+/// the pull request. It is outward-facing, so it asks first; what the host
+/// answers stays under `untrusted_*` and out of the text; the host's token
+/// is a setting and never an argument.
+#[tokio::test]
+async fn git_resolve_opens_a_pull_request_at_the_git_host() {
+    use crate::sourcecontrol::fake_host::{Fake, READER, WRITER};
+    if !git_installed() {
+        eprintln!("git is not installed: git tool test skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bare = dir.path().join("remote.git");
+    let out = std::process::Command::new("git")
+        .args(["init", "--quiet", "--bare", "-b", "main"])
+        .arg(&bare)
+        .output()
+        .expect("git init --bare");
+    assert!(out.status.success());
+    let repository = format!(
+        "{}/remote",
+        dir.path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("directory name")
+    );
+    let fake = Fake::start("github", &repository, &bare).await;
+    let mut c = ai_config();
+    c.state_dir = Some(dir.path().join("state"));
+    c.egress_allow_loopback = true;
+    let state = test_state_with(c);
+    let app = test_app_with(state.clone());
+    let r = tool(
+        &app,
+        &[],
+        "update_settings",
+        json!({ "values": {
+            "git.remote": format!("file://{}", bare.display()),
+            "git.host": "github",
+            "git.host_api": fake.api.clone(),
+        }, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    assert!(!is_error(&tool(&app, &[], "git_init", json!({})).await));
+    let r = tool(&app, &[], "git_commit", json!({ "message": "First" })).await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(&app, &[], "git_push", json!({ "confirm": true })).await;
+    assert!(!is_error(&r), "{r}");
+    let r = tool(
+        &app,
+        &[],
+        "update_settings",
+        json!({ "values": { "console.title": "For review" }, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+
+    // The status says where a pull request would be opened, and that the
+    // token is missing. No token: refused before anything is pushed, for
+    // the preview too.
+    let r = tool(&app, &[], "git_status", json!({})).await;
+    let host = &r["structuredContent"]["host"];
+    assert_eq!(host["kind"], "github", "{r}");
+    assert_eq!(host["ready"], false, "{r}");
+    let open = json!({ "with": "pull_request", "branch": "review/title", "open": true });
+    let mut preview = open.clone();
+    preview["dry_run"] = json!(true);
+    let r = tool(&app, &[], "git_resolve", preview.clone()).await;
+    assert!(
+        is_error(&r) && text_of(&r).contains("git.host_token"),
+        "{r}"
+    );
+    // The token is a setting a person sets, never an argument of the tool.
+    let schema = (crate::mcp::manage::tools::TOOLS
+        .iter()
+        .find(|t| t.name == "git_resolve")
+        .expect("git_resolve")
+        .input_schema)();
+    let properties = schema["properties"].as_object().expect("properties");
+    assert!(properties.contains_key("open"), "{schema}");
+    assert!(properties.keys().all(|k| !k.contains("token")), "{schema}");
+    let mut secrets = std::collections::BTreeMap::new();
+    secrets.insert("git.host_token".to_string(), Some(WRITER.to_string()));
+    state
+        .settings
+        .update(Default::default(), secrets, "test")
+        .expect("token");
+
+    // The preview needs no confirmation and calls nothing.
+    let r = tool(&app, &[], "git_resolve", preview).await;
+    assert!(!is_error(&r), "{r}");
+    assert_eq!(
+        r["structuredContent"]["would_open"]["host"]["kind"], "github",
+        "{r}"
+    );
+    assert!(text_of(&r).starts_with("Preview"), "{}", text_of(&r));
+    assert_eq!(fake.call_count(), 0);
+    // The call is outward-facing: it asks, and says what it would do.
+    let r = tool(&app, &[], "git_resolve", open.clone()).await;
+    assert!(is_error(&r) && text_of(&r).contains("confirm"), "{r}");
+    assert!(text_of(&r).contains("git host"), "{}", text_of(&r));
+    assert_eq!(fake.call_count(), 0);
+    // open goes with pull_request only.
+    let r = tool(
+        &app,
+        &[],
+        "git_resolve",
+        json!({ "with": "instance", "open": true, "confirm": true }),
+    )
+    .await;
+    assert!(is_error(&r) && text_of(&r).contains("pull_request"), "{r}");
+
+    // Confirmed: pushed and opened. The address is the host's, so it is
+    // under untrusted_pull_request and never in the text.
+    let mut confirmed = open.clone();
+    confirmed["confirm"] = json!(true);
+    let r = tool(&app, &[], "git_resolve", confirmed).await;
+    assert!(!is_error(&r), "{r}");
+    let answer = &r["structuredContent"];
+    assert_eq!(answer["opened"], true, "{r}");
+    assert_eq!(answer["untrusted_pull_request"]["number"], 1, "{r}");
+    let url = answer["untrusted_pull_request"]["url"]
+        .as_str()
+        .expect("url");
+    assert!(url.starts_with("https://github.example/"), "{url}");
+    assert!(!text_of(&r).contains("github.example"), "{}", text_of(&r));
+    assert!(
+        text_of(&r).contains("opened a pull request"),
+        "{}",
+        text_of(&r)
+    );
+    assert_eq!(fake.call_count(), 1);
+    assert_eq!(fake.last_call()["body"]["head"], "review/title");
+    assert_eq!(fake.last_call()["body"]["base"], "main");
+    assert!(!r.to_string().contains(WRITER), "{r}");
+
+    // A host that refuses: not an error of the tool (the branch is
+    // pushed), the reason in the instance's words, the host's apart.
+    let mut secrets = std::collections::BTreeMap::new();
+    secrets.insert("git.host_token".to_string(), Some(READER.to_string()));
+    state
+        .settings
+        .update(Default::default(), secrets, "test")
+        .expect("token");
+    let r = tool(
+        &app,
+        &[],
+        "git_resolve",
+        json!({ "with": "pull_request", "branch": "review/again", "open": true, "confirm": true }),
+    )
+    .await;
+    assert!(!is_error(&r), "{r}");
+    let answer = &r["structuredContent"];
+    assert_eq!(answer["opened"], false, "{r}");
+    assert_eq!(answer["not_opened"]["reason"], "not_permitted", "{r}");
+    let said = answer["not_opened"]["untrusted_host_message"]
+        .as_str()
+        .expect("the host's words");
+    assert!(!text_of(&r).contains(said), "{}", text_of(&r));
+    assert!(text_of(&r).contains("was not opened"), "{}", text_of(&r));
+    assert!(!r.to_string().contains(READER), "{r}");
+}
