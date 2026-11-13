@@ -3,8 +3,9 @@
 # temporary directory: an instance with a state directory commits and pushes
 # its configuration, a second instance starts from the repository
 # (RUSTYBIN_CONFIG_GIT) and holds the same mock; then a diverged branch and its
-# ways out (a side, a pull request), a branch per environment, signed
-# commits and verified pulls. Run through
+# ways out (a side, a pull request, and the git host's API opening it: the
+# host is a stand-in here, a Rustybin mock on loopback, never a real host),
+# a branch per environment, signed commits and verified pulls. Run through
 # docs/examples/run.sh, which exports RUSTYBIN_BIN and BASE.
 set -euo pipefail
 BIN="${RUSTYBIN_BIN:-$(command -v rustybin || true)}"
@@ -19,6 +20,7 @@ while busy "$PORT"; do PORT=$(( PORT + 1 )); done
 PORT2=$(( PORT + 1 ))
 while busy "$PORT2"; do PORT2=$(( PORT2 + 1 )); done
 ADMIN="docs-git-admin"
+HOST_TOKEN="docs-git-host-token-123456"
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true; wait "${pids[@]}" 2>/dev/null || true; rm -rf "$work"' EXIT
 cd "$work"
@@ -246,6 +248,67 @@ expect "$out" '"branch":"review/payments"'
 expect "$out" '"base":"main"'
 expect "$(git -C config.git log -1 --format=%s review/payments)" 'Add the payments mock'
 expect "$(git -C config.git log -1 --format=%s main)" 'More notes'
+
+# The git host's API can open the pull request. No real host is called here:
+# a second Rustybin plays one, with a mock of the one call the instance makes.
+PORT4=$(( PORT3 + 1 ))
+while busy "$PORT4"; do PORT4=$(( PORT4 + 1 )); done
+RUSTYBIN_HTTP_PORT=$PORT4 RUSTYBIN_HTTPS_PORT=0 RUSTYBIN_GRPC_PORT=0 RUSTYBIN_HOST=127.0.0.1 \
+  RUSTYBIN_LOG_LEVEL=warn RUSTYBIN_CONTROL_AUTH=open RUSTYBIN_ADMIN_TOKEN=$ADMIN \
+  "$BIN" &
+pids+=($!)
+H="http://127.0.0.1:$PORT4"
+for _ in $(seq 1 100); do curl -fs -o /dev/null "$H/" && break; sleep 0.1; done
+curl -s -o /dev/null -X POST "$H/_rustybin/mocks" -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"name":"githost","spec":{"openapi":"3.0.3","info":{"title":"A git host, for the example","version":"1"},"paths":{"/api/v3/repos/{owner}/{repo}/pulls":{"post":{"operationId":"openPullRequest","parameters":[{"name":"owner","in":"path","required":true,"schema":{"type":"string"}},{"name":"repo","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"201":{"description":"opened","content":{"application/json":{"example":{"number":7,"html_url":"https://git.example.com/acme/config/pull/7"}}}}}}}}}}'
+HOST_API="$H/mock/githost/api/v3"
+# ANCHOR: host_settings
+# Which host, where its API is (only for a self-hosted one: github.com and
+# gitlab.com are recognised from the repository's address), and a token
+# that may open pull requests. The token is a secret: stored sealed, never
+# shown again.
+curl -s -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d "{\"values\": {\"git.host\": \"github\", \"git.host_api\": \"$HOST_API\"}, \"secrets\": {\"git.host_token\": \"$HOST_TOKEN\"}}" \
+  "$A/_rustybin/settings"
+# ANCHOR_END: host_settings
+out=$(curl -s -H "Authorization: Bearer $ADMIN" "$A/_rustybin/git")
+expect "$out" '"host":{"setting":"github","kind":"github"'
+expect "$out" '"token_from":"git.host_token","ready":true'
+out=$(
+# ANCHOR: pull_request_open_preview
+# What would be opened and where. Nothing is pushed and the host is not called.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"with": "pull_request", "branch": "review/payments-2", "open": true, "dry_run": true}' "$A/_rustybin/git/resolve"
+# ANCHOR_END: pull_request_open_preview
+)
+echo "$out"
+expect "$out" '"would_open":{"host":{"kind":"github"'
+expect "$out" '"head":"review/payments-2"'
+out=$(
+# ANCHOR: pull_request_open
+# Pushed, and the host is asked to open the pull request: one call.
+curl -s -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"with": "pull_request", "branch": "review/payments-2", "open": true, "message": "Payments, for review"}' "$A/_rustybin/git/resolve"
+# ANCHOR_END: pull_request_open
+)
+echo "$out"
+expect "$out" '"opened":true'
+expect "$out" '"untrusted_pull_request":{"number":7,"url":"https://git.example.com/acme/config/pull/7"}'
+expect "$(git -C config.git log -1 --format=%s review/payments-2)" 'Add the payments mock'
+case "$out" in *"$HOST_TOKEN"*) echo "the token is in the answer" >&2; exit 1 ;; esac
+# The stand-in saw one call, with the two branches and the token as a bearer.
+seen=$(curl -s -H "Authorization: Bearer $ADMIN" "$H/_rustybin/mocks/githost/requests")
+expect "$seen" 'review/payments-2'
+# A host that cannot be asked (none) is said before anything is pushed.
+curl -s -o /dev/null -X PATCH -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"values": {"git.host": "none"}}' "$A/_rustybin/settings"
+out=$(curl -s -w '%{http_code}' -X POST -H "Authorization: Bearer $ADMIN" -H "Content-Type: application/json" \
+  -d '{"with": "pull_request", "branch": "review/payments-3", "open": true}' "$A/_rustybin/git/resolve")
+expect "$out" '"reason":"host_not_set"'
+expect "$out" '409$'
+if git -C config.git rev-parse --verify --quiet refs/heads/review/payments-3 >/dev/null; then
+  echo "a refused call pushed a branch" >&2; exit 1
+fi
 
 # The person merges the pull request at the host (a merge commit).
 git -C elsewhere fetch --quiet origin

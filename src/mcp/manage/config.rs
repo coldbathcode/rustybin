@@ -480,7 +480,10 @@ pub async fn git_pull(ctx: &CallCtx, access: &Access, args: &Value, params: &Val
 /// `git_resolve` (admin, confirmed unless `dry_run`): the ways out of a
 /// diverged branch. The instance's copy wins (`with: instance`), the
 /// repository's (`repository`), or the instance's side goes to a new branch
-/// for a pull request at the git host (`pull_request`, nothing applied).
+/// for a pull request at the git host (`pull_request`, nothing applied;
+/// with `open` the host's API is asked to open it). What the host answers
+/// (the pull request's address, a refusal's words) stays under
+/// `untrusted_*` in the structured answer and is never in the text.
 pub async fn git_resolve(ctx: &CallCtx, access: &Access, args: &Value, params: &Value) -> Value {
     let with = match need_str(args, "with") {
         Ok(w) => w,
@@ -490,6 +493,10 @@ pub async fn git_resolve(ctx: &CallCtx, access: &Access, args: &Value, params: &
         return err("with must be instance (this instance's configuration is committed on top of the remote branch), repository (the repository's document is applied here) or pull_request (this instance's side is pushed to a new branch, nothing applied)");
     }
     let dry_run = arg_bool(args, "dry_run").unwrap_or(false);
+    let open = arg_bool(args, "open").unwrap_or(false);
+    if open && with != "pull_request" {
+        return err("open goes with pull_request: the other ways out open nothing at the git host");
+    }
     let req = crate::sourcecontrol::Resolve {
         with: with.to_string(),
         message: arg_str(args, "message").unwrap_or("").to_string(),
@@ -497,14 +504,20 @@ pub async fn git_resolve(ctx: &CallCtx, access: &Access, args: &Value, params: &
             .filter(|b| !b.trim().is_empty())
             .map(str::to_string),
         dry_run,
+        open,
     };
     if !dry_run {
         let action = match with {
             "instance" => "resolve the diverged branch with this instance's configuration: the local commits are dropped and the instance's configuration is committed on top of the remote branch and pushed (the repository's document is replaced; never a forced push)".to_string(),
             "repository" => "resolve the diverged branch with the repository's document: it is applied to this instance with prune and the local commits are dropped".to_string(),
             _ => format!(
-                "push this instance's side to a new branch of the remote ({}) for a pull request: the configuration leaves this host, nothing is applied",
-                req.branch.as_deref().unwrap_or("a made name")
+                "push this instance's side to a new branch of the remote ({}) for a pull request{}: the configuration leaves this host, nothing is applied",
+                req.branch.as_deref().unwrap_or("a made name"),
+                if open {
+                    ", and ask the git host's API to open that pull request (the names of what this instance holds go into its text)"
+                } else {
+                    ""
+                }
             ),
         };
         if let Confirm::Answer(v) = confirm(ctx, "git_resolve", args, params, &action).await {

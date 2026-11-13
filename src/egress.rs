@@ -715,10 +715,14 @@ pub enum Purpose {
     /// An AsyncAPI mock's messages posted to a webhook subscriber
     /// (`crate::events`).
     Events,
+    /// The git host's API, asked to open a pull request for a diverged
+    /// branch (`crate::sourcecontrol::host`). Never the remote itself,
+    /// which is [`Purpose::Git`].
+    GitHost,
 }
 
 impl Purpose {
-    pub const ALL: [Purpose; 15] = [
+    pub const ALL: [Purpose; 16] = [
         Purpose::Assist,
         Purpose::McpRelay,
         Purpose::Registry,
@@ -734,6 +738,7 @@ impl Purpose {
         Purpose::Sso,
         Purpose::Record,
         Purpose::Events,
+        Purpose::GitHost,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -753,6 +758,7 @@ impl Purpose {
             Purpose::Sso => "sso",
             Purpose::Record => "record",
             Purpose::Events => "events",
+            Purpose::GitHost => "git_host",
         }
     }
 
@@ -774,6 +780,7 @@ impl Purpose {
             Purpose::Sso => "Single sign-on provider",
             Purpose::Record => "Recordings of a real API",
             Purpose::Events => "Event mock webhooks",
+            Purpose::GitHost => "Git host API",
         }
     }
 
@@ -799,6 +806,7 @@ impl Purpose {
             Purpose::Events => {
                 "RUSTYBIN_EGRESS_ALLOW only (the webhook subscribers of event mocks; no default)"
             }
+            Purpose::GitHost => "the git host's API (git.host, git.host_api), once a host is set",
         }
     }
 }

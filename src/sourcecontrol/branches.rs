@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 
 use super::signing::settings_error;
 use super::{
-    busy, check_branch, instance_document, read_document, GitEnv, GitError, GitResult,
+    busy, check_branch, host, instance_document, read_document, GitEnv, GitError, GitResult,
     SourceControl, TempDir, BRANCH_KEY, GIT_TIMEOUT,
 };
 use crate::configdoc::{self, Change, DOCUMENT_NAME};
@@ -59,6 +59,11 @@ fn branch_name(raw: &str) -> GitResult<String> {
     let name = raw.trim().to_string();
     check_branch(&json!(name)).map_err(|e| GitError::new(StatusCode::BAD_REQUEST, e))?;
     Ok(name)
+}
+
+/// The host a pull request is opened at, for an answer. Never the token.
+fn host_json(at: &host::Target) -> Value {
+    json!({ "kind": at.kind.as_str(), "api": at.api, "repository": at.repository })
 }
 
 fn changes_json(changes: &[Change]) -> Value {
@@ -232,12 +237,18 @@ impl SourceControl {
     /// committed locally when it differs, the local branch is pushed under
     /// the new name (never forced), nothing is applied and `git.branch`
     /// stays: the branch reads as diverged until the merge is pulled.
+    ///
+    /// With `open` the git host is then asked to open the pull request
+    /// (`host.rs`). What the settings cannot serve is refused before
+    /// anything is pushed; a host that does not open it leaves the pushed
+    /// branch and the answer says why.
     pub(super) async fn resolve_pull_request(
         &self,
         state: &AppState,
         target: Option<&str>,
         message: &str,
         dry_run: bool,
+        open: bool,
     ) -> GitResult<Value> {
         let (repo, remote) = self.ready().await?;
         let env = self.git_env(&remote)?;
@@ -255,6 +266,10 @@ impl SourceControl {
                 format!("{target} is the branch this instance is on: a pull request needs a branch of its own"),
             ));
         }
+        // The host a pull request is opened at: what is missing (no kind,
+        // no token, an API the outbound policy refuses) is said before
+        // anything is pushed and before any call, for a preview too.
+        let host = if open { Some(self.host_ready()?) } else { None };
         {
             let _guard = self.lock.try_lock().map_err(|_| busy())?;
             self.need_init(&repo)?;
@@ -267,7 +282,7 @@ impl SourceControl {
                     Ok((changes, _)) => changes,
                     Err(e) => return Err(GitError::failed(e)),
                 };
-                return Ok(json!({
+                let mut body = json!({
                     "dry_run": true,
                     "would_resolve": "pull_request",
                     "branch": target,
@@ -280,7 +295,31 @@ impl SourceControl {
                         "would push this instance's side ({ahead} commit(s){}) to the new branch {target}; nothing applied",
                         if uncommitted.is_empty() { "" } else { " plus one for what is not committed yet" }
                     ),
-                }));
+                });
+                // What would be opened and where. Nothing is called.
+                if let Some((at, _)) = &host {
+                    let changes = self
+                        .sides(state, &env, &repo, &format!("origin/{base}"))
+                        .await
+                        .ok()
+                        .map(|(instance, _)| instance);
+                    let (title, text) =
+                        host::pull_request_text(&base, &target, message, changes.as_deref());
+                    body["would_open"] = json!({
+                        "host": host_json(at),
+                        "base": base,
+                        "head": target,
+                        "title": title,
+                        "body": text,
+                    });
+                    body["detail"] = json!(format!(
+                        "{}; would then ask {} ({}) to open a pull request from {target} into {base}",
+                        body["detail"].as_str().unwrap_or(""),
+                        crate::egress::url_origin(&at.api),
+                        at.kind.as_str()
+                    ));
+                }
+                return Ok(body);
             }
         }
         let message = if message.trim().is_empty() {
@@ -289,65 +328,132 @@ impl SourceControl {
             message.to_string()
         };
         let committed = self.commit_inner(state, &message, &[]).await?;
-        let _guard = self.lock.try_lock().map_err(|_| busy())?;
-        if self.head(&env, &repo).await.is_none() {
-            return Err(GitError::conflict(
-                "nothing to put in a pull request: this instance has no commit",
-            ));
-        }
-        let (ahead, behind) = self.ahead_behind(&env, &repo, &base).await;
-        let upstream_exists = self
-            .git(
-                &env,
-                &repo,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "--quiet",
-                    &format!("origin/{base}"),
-                ],
-            )
-            .await
-            .ok;
-        if upstream_exists && ahead == 0 {
-            return Err(GitError::conflict(format!(
-                "this instance has no commit the remote's {base} lacks: there is nothing to put in a pull request"
-            )));
-        }
-        // Never forced: a remote branch of that name with other commits is
-        // refused by the remote, and nothing there changes.
-        let refspec = format!("HEAD:refs/heads/{target}");
-        let out = self
-            .git(&env, &repo, &["push", "--quiet", "origin", &refspec])
-            .await;
-        if !out.ok {
-            let text = out.stderr.to_ascii_lowercase();
-            if text.contains("non-fast-forward")
-                || text.contains("fetch first")
-                || text.contains("rejected")
-            {
+        // The git lock is held for the push and let go before the host is
+        // called: a slow host never holds the working copy.
+        let (mut body, text) = {
+            let _guard = self.lock.try_lock().map_err(|_| busy())?;
+            if self.head(&env, &repo).await.is_none() {
+                return Err(GitError::conflict(
+                    "nothing to put in a pull request: this instance has no commit",
+                ));
+            }
+            let (ahead, behind) = self.ahead_behind(&env, &repo, &base).await;
+            let upstream_exists = self
+                .git(
+                    &env,
+                    &repo,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("origin/{base}"),
+                    ],
+                )
+                .await
+                .ok;
+            if upstream_exists && ahead == 0 {
                 return Err(GitError::conflict(format!(
-                    "the remote already has a branch {target} with other commits: name another branch"
+                    "this instance has no commit the remote's {base} lacks: there is nothing to put in a pull request"
                 )));
             }
-            return Err(GitError::failed(format!("git push: {}", out.stderr)));
+            // Never forced: a remote branch of that name with other commits is
+            // refused by the remote, and nothing there changes.
+            let refspec = format!("HEAD:refs/heads/{target}");
+            let out = self
+                .git(&env, &repo, &["push", "--quiet", "origin", &refspec])
+                .await;
+            if !out.ok {
+                let text = out.stderr.to_ascii_lowercase();
+                if text.contains("non-fast-forward")
+                    || text.contains("fetch first")
+                    || text.contains("rejected")
+                {
+                    return Err(GitError::conflict(format!(
+                        "the remote already has a branch {target} with other commits: name another branch"
+                    )));
+                }
+                return Err(GitError::failed(format!("git push: {}", out.stderr)));
+            }
+            crate::audit::event("git_pull_request");
+            crate::audit::target("branch", &target);
+            // The pull request's text, from the instance's side only.
+            let text = if host.is_some() {
+                let changes = self
+                    .sides(state, &env, &repo, &format!("origin/{base}"))
+                    .await
+                    .ok()
+                    .map(|(instance, _)| instance);
+                Some(host::pull_request_text(
+                    &base,
+                    &target,
+                    &message,
+                    changes.as_deref(),
+                ))
+            } else {
+                None
+            };
+            let body = json!({
+                "resolved": "pull_request",
+                "branch": target,
+                "base": base,
+                "pushed": true,
+                "commit": committed,
+                "head": self.head(&env, &repo).await,
+                "ahead": ahead,
+                "behind": behind,
+                "applied": null,
+                "detail": format!(
+                    "pushed this instance's side to {target}: open a pull request from {target} into {base} at the git host. Nothing was applied, and {base} reads as diverged here until the merge is pulled"
+                ),
+            });
+            (body, text)
+        };
+        let (Some((at, token)), Some((title, text))) = (host, text) else {
+            return Ok(body);
+        };
+        let pr = host::PullRequest {
+            repository: &at.repository,
+            base: &base,
+            head: &target,
+            title: &title,
+            body: &text,
+        };
+        body["host"] = host_json(&at);
+        match self.open_at_host(&at, &token, &pr).await {
+            Ok(opened) => {
+                crate::audit::event("git_pull_request_opened");
+                tracing::info!(
+                    target: "rustybin::git",
+                    kind = at.kind.as_str(),
+                    host = %crate::egress::url_origin(&at.api),
+                    "a pull request was opened at the git host"
+                );
+                body["opened"] = json!(true);
+                // The host's own answer: third-party content.
+                body["untrusted_pull_request"] =
+                    json!({ "number": opened.number, "url": opened.url });
+                body["detail"] = json!(format!(
+                    "pushed this instance's side to {target} and opened a pull request from {target} into {base} at the git host (its address is in untrusted_pull_request). Nothing was applied, and {base} reads as diverged here until the merge is pulled"
+                ));
+            }
+            Err(not) => {
+                tracing::warn!(
+                    target: "rustybin::git",
+                    kind = at.kind.as_str(),
+                    host = %crate::egress::url_origin(&at.api),
+                    reason = not.reason,
+                    status = not.status.unwrap_or(0),
+                    "the git host did not open the pull request"
+                );
+                body["opened"] = json!(false);
+                body["not_opened"] = not.json();
+                body["detail"] = json!(format!(
+                    "pushed this instance's side to {target}, and the pull request was not opened: {}. The branch stays pushed: open a pull request from {target} into {base} at the git host. Nothing was applied, and {base} reads as diverged here until the merge is pulled",
+                    not.why
+                ));
+            }
         }
-        crate::audit::event("git_pull_request");
-        crate::audit::target("branch", &target);
-        Ok(json!({
-            "resolved": "pull_request",
-            "branch": target,
-            "base": base,
-            "pushed": true,
-            "commit": committed,
-            "head": self.head(&env, &repo).await,
-            "ahead": ahead,
-            "behind": behind,
-            "applied": null,
-            "detail": format!(
-                "pushed this instance's side to {target}: open a pull request from {target} into {base} at the git host. Nothing was applied, and {base} reads as diverged here until the merge is pulled"
-            ),
-        }))
+        Ok(body)
     }
 
     /// `GET /_rustybin/git/branches`: the remote's branches.

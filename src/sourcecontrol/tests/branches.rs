@@ -49,7 +49,7 @@ fn host_clone(root: &Path, name: &str) -> std::path::PathBuf {
 
 /// Two instances on one branch, each with a commit the other lacks: A's is
 /// on the remote, B's is local.
-async fn diverged(root: &Path) -> (AppState, AppState) {
+pub(super) async fn diverged(root: &Path) -> (AppState, AppState) {
     let remote = bare_repo(root);
     let a = instance(root, "a", &remote);
     let b = instance(root, "b", &remote);
@@ -76,7 +76,7 @@ async fn diverged(root: &Path) -> (AppState, AppState) {
     (a, b)
 }
 
-fn resolve_with(with: &str) -> Resolve {
+pub(super) fn resolve_with(with: &str) -> Resolve {
     Resolve {
         with: with.into(),
         ..Default::default()

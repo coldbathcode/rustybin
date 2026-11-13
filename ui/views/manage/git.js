@@ -5,7 +5,8 @@
 // commit next to the document), Pull (a dry run with the diff,
 // then apply), a diverged branch (what differs, and the three ways out,
 // each with a preview: this instance's copy, the repository's, or a new
-// branch for a pull request at the git host), Branches (the remote's, a
+// branch for a pull request at the git host, which the host's API opens
+// when the box is ticked: its address is shown after), Branches (the remote's, a
 // switch with a preview, a new branch from this instance), the deploy key,
 // the commit signing key (its public half and fingerprint), verified pulls
 // (the switch, the allowed signers, the last verified head, the last
@@ -43,6 +44,17 @@ async function read(path) {
 // A refused commit of the repository's side (verification.last_refusal).
 function refusalText(r) {
   return (r.commit ? 'commit ' + String(r.commit).slice(0, 7) + ' ' : '') + (r.why || 'is not verified') + (r.branch ? ' (' + r.branch + ', ' + fmtTime(r.at) + ')' : '');
+}
+
+// The pull request a git host opened (untrusted_pull_request: the host's
+// own answer). Its address is a link only when it is a plain web address;
+// it is shown as text either way.
+function pullRequestBlock(pr) {
+  const url = typeof pr.url === 'string' && /^https?:\/\//i.test(pr.url) ? pr.url : null;
+  return h('div', { class: 'small', id: 'git-pull-request' },
+    h('strong', null, 'Pull request' + (Number.isInteger(pr.number) ? ' ' + pr.number : '') + (url ? ': ' : '')),
+    url ? h('a', { href: url, target: '_blank', rel: 'noopener noreferrer', class: 'mono' }, url) : null,
+    h('span', { class: 'muted' }, ' (as the git host answered it)'));
 }
 
 function lines(list, id) {
@@ -91,6 +103,8 @@ export function gitPanel(doc, reload, error) {
   // status and draws the cards again around these same controls.
   const message = input({ id: 'git-message', placeholder: 'What changed and why', 'aria-label': 'Commit message', maxlength: 2000 });
   const prBranch = input({ id: 'git-resolve-branch', placeholder: 'a new branch (a name is made when empty)', 'aria-label': 'Branch for the pull request', maxlength: 128 });
+  const prOpen = checkbox('Open the pull request at the git host', false);
+  prOpen.input.id = 'git-resolve-open';
   const branchList = h('div', { id: 'git-branch-list' });
   let branchesListed = false;
   const branchPrune = checkbox('Prune when applying (the branch\'s document is the whole truth)', true);
@@ -147,6 +161,7 @@ export function gitPanel(doc, reload, error) {
       ['Last commit', head],
       ['Against the remote', sync || (st.fetched ? 'unknown' : h('button', { class: 'btn sm ghost', type: 'button', id: 'git-fetch', onclick: () => load(true) }, icon('refresh'), 'Ask the remote'))],
       ['Automatic mode', st.auto === 'off' ? 'off' : st.auto === 'pull' ? 'pull and apply every ' + st.pull_every : 'push every change (checked every 30 s)'],
+      ['Git host', st.host && st.host.kind ? h('span', { id: 'git-host' }, st.host.kind, st.host.api ? h('span', { class: 'muted small' }, ' (' + st.host.api + (st.host.repository ? ', ' + st.host.repository : '') + ') ') : ' ', st.host.ready ? badge('can open a pull request', 'ok') : badge('cannot open a pull request yet', 'warn')) : h('span', { id: 'git-host' }, 'none: a pull request is opened by hand')],
       ['Commit signing', st.signing && st.signing.enabled ? (st.signing.problem ? badge('on, and cannot work', 'err') : badge('on', 'ok')) : 'off'],
       ['Verified pulls', st.verification && st.verification.enabled ? (st.verification.problem ? badge('on, and nothing can pass', 'err') : st.verification.last_refusal ? badge('on, the last pull was refused', 'err') : badge('on', 'ok')) : 'off'],
     ]));
@@ -172,7 +187,13 @@ export function gitPanel(doc, reload, error) {
     function waysOut() {
       const id = (name) => 'git-resolve-' + name;
       const resolve = (body) => act(body.dry_run ? 'Checking' : 'Resolving', '/_rustybin/git/resolve', body);
-      const pr = (dry) => resolve(Object.assign({ with: 'pull_request', dry_run: dry, message: message.value }, prBranch.value.trim() ? { branch: prBranch.value.trim() } : {}));
+      // The git host's API opens the pull request only when it can (a
+      // host is set up and has a token): the box says why when it cannot.
+      const host = st.host || {};
+      prOpen.input.disabled = !host.ready;
+      if (!host.ready) prOpen.input.checked = false;
+      const opens = () => !!host.ready && prOpen.input.checked;
+      const pr = (dry) => resolve(Object.assign({ with: 'pull_request', dry_run: dry, message: message.value }, prBranch.value.trim() ? { branch: prBranch.value.trim() } : {}, opens() ? { open: true } : {}));
       return h('div', { class: 'stack', style: { marginTop: '6px' } },
         h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
           perms.guard(h('button', { class: 'btn sm ghost', type: 'button', id: id('instance-preview'), onclick: () => resolve({ with: 'instance', dry_run: true }) }, icon('diff'), 'Preview'), 'git.write'),
@@ -184,9 +205,14 @@ export function gitPanel(doc, reload, error) {
           h('span', { class: 'muted small' }, 'This instance takes the repository\'s configuration, with prune.')),
         h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
           perms.guard(h('button', { class: 'btn sm ghost', type: 'button', id: id('pr-preview'), onclick: () => pr(true) }, icon('diff'), 'Preview'), 'git.write'),
-          perms.guard(h('button', { class: 'btn sm', type: 'button', id: id('pr'), onclick: () => { if (confirm('Push this instance\'s side to a new branch of the remote for a pull request? Nothing is applied here.')) pr(false); } }, icon('upload'), 'Push to a new branch for a pull request'), 'git.write'),
+          perms.guard(h('button', { class: 'btn sm', type: 'button', id: id('pr'), onclick: () => { if (confirm(opens() ? 'Push this instance\'s side to a new branch of the remote and ask the git host (' + host.kind + ') to open a pull request? Nothing is applied here, and nothing is merged.' : 'Push this instance\'s side to a new branch of the remote for a pull request? Nothing is applied here.')) pr(false); } }, icon('upload'), 'Push to a new branch for a pull request'), 'git.write'),
           h('div', { style: { minWidth: '220px' } }, prBranch),
-          h('span', { class: 'muted small' }, 'A person merges it at the git host; then pull.')));
+          h('span', { class: 'muted small' }, 'A person merges it at the git host; then pull.')),
+        h('div', { class: 'row', style: { gap: '6px', flexWrap: 'wrap' } },
+          prOpen.el,
+          h('span', { class: 'muted small', id: 'git-resolve-open-hint' }, host.ready
+            ? 'Asks ' + host.kind + ' (' + host.api + ') to open it from the new branch into ' + st.branch + '. It is never merged from here.'
+            : 'Not possible yet: ' + (host.why || 'no git host is set up') + '. The settings git.host, git.host_api and git.host_token are in the repository form above.')));
     }
     async function act(label, path, body, after) {
       replace(result, spinner(label));
@@ -200,7 +226,13 @@ export function gitPanel(doc, reload, error) {
         return;
       }
       const j = r.json || {};
-      replace(result, notice('ok', j.detail || label + ' done'),
+      // A pull request the host did not open: the branch is pushed all the
+      // same, so the answer is a warning, with the host's own words apart.
+      const notOpened = j.opened === false && j.not_opened;
+      replace(result, notice(notOpened ? 'warn' : 'ok', j.detail || label + ' done'),
+        j.untrusted_pull_request ? pullRequestBlock(j.untrusted_pull_request) : null,
+        notOpened && j.not_opened.untrusted_host_message ? h('div', { class: 'small', id: 'git-not-opened' }, h('strong', null, 'The git host said: '), j.not_opened.untrusted_host_message) : null,
+        j.would_open ? h('div', { class: 'small', id: 'git-would-open' }, h('strong', null, 'Would open: '), j.would_open.title, h('span', { class: 'muted' }, ' at ' + j.would_open.host.api + ' (' + j.would_open.host.kind + ', ' + j.would_open.host.repository + '), from ' + j.would_open.head + ' into ' + j.would_open.base)) : null,
         (j.commits || []).length ? lines(j.commits, 'git-result-commits') : null,
         !j.applied && (j.summary || []).length ? lines(j.summary, 'git-result-summary') : null,
         reportBlock(j.applied));
